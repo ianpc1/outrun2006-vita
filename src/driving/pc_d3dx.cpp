@@ -12,7 +12,9 @@ float st(X v){return x87_float(v);} // fstp DWORD
 float st(F24 v){return v.v;}
 // Runs body<F24> (binary32 arithmetic, pc_x87_f24.hpp) and, when an operation
 // left the binary32 normal range, body<X87> again; the exact model only.
-#if OR2_X87_FAST && !defined(OR2_F24_OFF)
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+template<class Body> auto run24(Body&& body){return body(F24{});}
+#elif OR2_X87_FAST && !defined(OR2_F24_OFF)
 template<class Body> auto run24(Body&& body){f24_bad=0;auto r=body(F24{});if(f24_bad)r=body(X{});return r;}
 #else
 template<class Body> auto run24(Body&& body){return body(X{});}
@@ -127,6 +129,17 @@ constexpr std::uint8_t D3dxMultiplyOrder[16][4][2]{
     {{14,10},{13,6},{12,2},{15,14}},
     {{15,15},{13,7},{12,3},{14,11}}};
 PcMatrix16 pc_d3dx_matrix_multiply(const PcMatrix16& a,const PcMatrix16& b){
+#if OR2_X87_VITA
+    PcMatrix16 out{};
+    for(unsigned r=0;r<4;++r){
+        const float a0=a[r*4+0],a1=a[r*4+1],a2=a[r*4+2],a3=a[r*4+3];
+        out[r*4+0]=a0*b[0]+a1*b[4]+a2*b[8] +a3*b[12];
+        out[r*4+1]=a0*b[1]+a1*b[5]+a2*b[9] +a3*b[13];
+        out[r*4+2]=a0*b[2]+a1*b[6]+a2*b[10]+a3*b[14];
+        out[r*4+3]=a0*b[3]+a1*b[7]+a2*b[11]+a3*b[15];
+    }
+    return out;
+#endif
 #if OR2_X87_FAST && !defined(OR2_F24_OFF)
     if(f24_dot_range(a.data(),16)&&f24_dot_range(b.data(),16)){   // binary32, no range checks needed (pc_x87_f24.hpp)
         PcMatrix16 out{};
@@ -156,6 +169,15 @@ bool pc_d3dx_matrix_inverse(PcMatrix16& out,const PcMatrix16& in){
     out=result;return true;
 }
 PcVec3 pc_d3dx_vec3_transform_coord(const PcVec3& v,const PcMatrix16& m){
+#if OR2_X87_VITA
+    const float q0 = v[0]*m[0] + v[1]*m[4] + v[2]*m[8]  + m[12];
+    const float q1 = v[0]*m[1] + v[1]*m[5] + v[2]*m[9]  + m[13];
+    const float q2 = v[0]*m[2] + v[1]*m[6] + v[2]*m[10] + m[14];
+    const float q3 = v[0]*m[3] + v[1]*m[7] + v[2]*m[11] + m[15];
+    if (std::fabs(q3 - 1.0f) <= 1.1920928955078125e-7f) return PcVec3{q0, q1, q2};
+    const float inv = 1.0f / q3;
+    return PcVec3{q0 * inv, q1 * inv, q2 * inv};
+#endif
 #if OR2_X87_FAST && !defined(OR2_F24_OFF)
     if(f24_dot_range(m.data(),16)&&f24_dot_range(v.data(),3)){
         std::array<float,4> q{};
@@ -176,6 +198,13 @@ PcVec3 pc_d3dx_vec3_transform_coord(const PcVec3& v,const PcMatrix16& m){
         return PcVec3{q[0],q[1],q[2]};});
 }
 PcVec3 pc_d3dx_vec3_transform_normal(const PcVec3& v,const PcMatrix16& m){
+#if OR2_X87_VITA
+    return PcVec3{
+        v[0]*m[0] + v[1]*m[4] + v[2]*m[8],
+        v[0]*m[1] + v[1]*m[5] + v[2]*m[9],
+        v[0]*m[2] + v[1]*m[6] + v[2]*m[10]
+    };
+#endif
 #if OR2_X87_FAST && !defined(OR2_F24_OFF)
     if(f24_dot_range(m.data(),12)&&f24_dot_range(v.data(),3))
         return PcVec3{(v[2]*m[8]+v[1]*m[4])+v[0]*m[0],(v[2]*m[9]+v[1]*m[5])+v[0]*m[1],(v[2]*m[10]+v[1]*m[6])+v[0]*m[2]};

@@ -1945,6 +1945,19 @@ struct T {
     // wall kind; the car takes the corrected position and heading.
     void wall_504e70(std::uint32_t car){
         if(!u32(car+0x5c)&&!gt(K(0x5b005cu),f32(car+0x268))&&!gt(f32(car+0x264),K(0x5b4444u)))return;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        const std::uint32_t pl_car = player();
+        if (car != pl_car && pl_car != 0u) {
+            static std::uint32_t s_wall_tick = 0;
+            const float dx = f32(car + 0x14) - f32(pl_car + 0x14);
+            const float dz = f32(car + 0x1c) - f32(pl_car + 0x1c);
+            const float dist_sq = dx * dx + dz * dz;
+            // Skip expensive 4-corner wall collision probes for far traffic/rivals (>80m)
+            if (dist_sq > 6400.0f) return;
+            // Nearby traffic/rivals: probe walls every 2nd frame per car
+            if (((++s_wall_tick + (car >> 6)) & 1u) != 0u) return;
+        }
+#endif
         Frame f(*this,0xa0);
         const std::uint32_t W=0x850ba0u;
         for(std::uint32_t k=0;k<0x900;k+=4)p32(W+k,0);
@@ -2660,6 +2673,11 @@ struct T {
             }
         }
         // the pairs
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        static std::uint32_t s_collide_frame = 0;
+        const bool skip_ai_pairs = ((++s_collide_frame % 3u) != 0u);
+        const float pl_x = f32(pl + 0x14), pl_z = f32(pl + 0x1c);
+#endif
         for(std::uint32_t id=8;id<0x20u;++id){
             if(!live(id))continue;
             const std::uint32_t A=work(id);
@@ -2671,6 +2689,13 @@ struct T {
             if(i16(A+0xb64)>0)continue;
             if((a4&1u)&&(a4&2u)&&(a4&0x800000u))continue;
             {const std::uint32_t t=u32(A+0xd14);if(t==4u||t==3u)continue;}
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            const bool a_is_pl = (A == pl);
+            if (!a_is_pl) {
+                const float adx = f32(A + 0x14) - pl_x, adz = f32(A + 0x1c) - pl_z;
+                if (adx * adx + adz * adz > 8100.0f) continue; // >90m from player: skip AI pair checks
+            }
+#endif
             push_409ef0();
             p32(E(0x4c),0);p32(E(0x34),0);
             const float radA=driving::x87_float(driving::x87_abs(X87(f32(A+0xd24)))+X87(f32(model_4866c0(i8(A+0x11))+0x18)));
@@ -2678,6 +2703,10 @@ struct T {
             for(std::uint32_t idB=id+1;idB<0x20u;++idB){
                 if(!live(idB))continue;
                 const std::uint32_t B=work(idB);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+                // Always check Player vs AI every frame; throttle AI vs AI to every 3rd frame
+                if (!a_is_pl && B != pl && skip_ai_pairs) continue;
+#endif
                 if(u8(B+8)&1u)continue;
                 if(u8(B+4)&0x40u)continue;
                 if(gt(K(0x5e0ac0u),f32(B+0x300)))continue;
@@ -3739,6 +3768,18 @@ struct T {
             return;
         }
         call(0x4a4010u,{w});
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        const std::uint32_t pl_vita = player();
+        const bool is_ai_vita = (pl_vita != 0u && w != pl_vita);
+        float ai_dist_sq_vita = 0.0f;
+        if (is_ai_vita) {
+            const float dx = f32(w + 0x14) - f32(pl_vita + 0x14);
+            const float dz = f32(w + 0x1c) - f32(pl_vita + 0x1c);
+            ai_dist_sq_vita = dx * dx + dz * dz;
+        }
+        const std::uint32_t ai_frame_vita = u32(0x802e08u);
+        const std::uint32_t ai_slot_vita = u32(w);
+#endif
         ai_47e6c0(w);
         if((call(0x4b00d0u,{})&0xffu)&&i32(w)<i32(0x680ad4u)+8)
             pf(w+0x1c4,driving::x87_float(callf(0x4b01a0u,{u32(w+0x1c4),u8(w+0xc36)})));
@@ -3757,11 +3798,28 @@ struct T {
         p16(w+0x40,u16(w+0x40)+std::uint16_t(cvtt(smul(sdiv(f32(w+0x1c4),f32(mr+8)),K(0x6282c0u)))));
         p16(w+0x44,u16(w+0x44)+std::uint16_t(cvtt(smul(sdiv(f32(w+0x1c4),f32(mr+8)),K(0x6282c0u)))));
         call(0x4a25f0u,{w});
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        // Skip visual-only AI car work (shadow, interior, display steer, body pose) on non-final ticks at 30 FPS.
+        const bool run_vis_vita = !is_ai_vita
+            || (outrun::driving::g_is_final_sim_tick
+                && ((ai_dist_sq_vita <= (70.0f * 70.0f))
+                    || (ai_dist_sq_vita <= (140.0f * 140.0f) && (((ai_frame_vita + ai_slot_vita) & 1u) == 0u))));
+        if (run_vis_vita) {
+            if(u32(u32(u32(model_4866c0(i8(w+0x11))))+4))shadow_470360(w);
+            p32(w+0x1f4,ftol(x(w+0x1c4)*X87(K(0x5a460cu))));
+            inside_470570(w);
+            driving::calc_disp_steering_angle_46eb40(m.bytes(w,0x10f0));
+            body_470760(w);
+        } else {
+            p32(w+0x1f4,ftol(x(w+0x1c4)*X87(K(0x5a460cu))));
+        }
+#else
         if(u32(u32(u32(model_4866c0(i8(w+0x11))))+4))shadow_470360(w);
         p32(w+0x1f4,ftol(x(w+0x1c4)*X87(K(0x5a460cu))));
         inside_470570(w);
         driving::calc_disp_steering_angle_46eb40(m.bytes(w,0x10f0));
         body_470760(w);
+#endif
         call(0x4a2400u,{w});call(0x4a2650u,{w});call(0x4a2910u,{w});call(0x4a2130u,{w});call(0x4a2ee0u,{w});
         if(u8(w+4)&1u)call(0x4a45f0u,{w});
         if(!(u32(0x78026cu)==0x10u&&u32(0x780258u)==4u&&!(u8(w+4)&1u))){

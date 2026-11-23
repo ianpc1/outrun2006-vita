@@ -27,6 +27,11 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#if defined(__vita__) || defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+#  define OR2_X87_VITA 1
+#else
+#  define OR2_X87_VITA 0
+#endif
 #ifndef OR2_X87_FAST
 #  if defined(__i386__) || defined(__x86_64__)
 #    define OR2_X87_FAST 0
@@ -43,7 +48,9 @@
 #endif
 namespace outrun::driving {
 enum class X87Precision : std::uint8_t { Single24, Double53, Extended64 };
-#if OR2_X87_FAST
+#if OR2_X87_VITA
+using x87_value_t=float;
+#elif OR2_X87_FAST
 using x87_value_t=double;
 #else
 using x87_value_t=long double;
@@ -53,7 +60,19 @@ using x87_value_t=long double;
 X87Precision& x87_precision();
 long double x87_round_bits(long double v,int bits);
 double x87_round_bits_d(double v,int bits);
-#if OR2_X87_FAST
+#if OR2_X87_VITA
+OR2_X87_INLINE float x87_add(float a,float b){return a+b;}
+OR2_X87_INLINE float x87_sub(float a,float b){return a-b;}
+OR2_X87_INLINE float x87_mul(float a,float b){return a*b;}
+OR2_X87_INLINE float x87_div(float a,float b){return a/b;}
+OR2_X87_INLINE float x87_sqrt_op(float a){
+    float r;
+    __asm__("vsqrt.f32 %0, %1" : "=t"(r) : "t"(a));
+    return r;
+}
+OR2_X87_INLINE float x87_round(float v){return v;}
+OR2_X87_INLINE long double x87_round(long double v){return static_cast<long double>(static_cast<float>(v));}
+#elif OR2_X87_FAST
 namespace x87_detail {
 OR2_X87_INLINE std::uint64_t bits(double d){std::uint64_t u;std::memcpy(&u,&d,8);return u;}
 OR2_X87_INLINE std::uint32_t bits(float f){std::uint32_t u;std::memcpy(&u,&f,4);return u;}
@@ -136,19 +155,19 @@ struct X87 {
     x87_value_t v{};
     constexpr X87()=default;
     constexpr X87(long double x):v(x_value(x)){}
-    constexpr X87(double x):v(x){}
+    constexpr X87(double x):v(x_value(x)){}
     constexpr X87(float x):v(x){}
-    constexpr X87(int x):v(x){}
-    constexpr X87(unsigned x):v(x){}
+    constexpr X87(int x):v(x_value(x)){}
+    constexpr X87(unsigned x):v(x_value(x)){}
     constexpr X87(long x):v(x_value(x)){}
     constexpr X87(long long x):v(x_value(x)){}
-    explicit operator float()const{return float(v);}
-    explicit operator double()const{return double(v);}
-    explicit operator long double()const{return v;}
-    X87& operator+=(X87 b){v=x87_add(v,b.v);return *this;}
-    X87& operator-=(X87 b){v=x87_sub(v,b.v);return *this;}
-    X87& operator*=(X87 b){v=x87_mul(v,b.v);return *this;}
-    X87& operator/=(X87 b){v=x87_div(v,b.v);return *this;}
+    OR2_X87_INLINE explicit operator float()const{return float(v);}
+    OR2_X87_INLINE explicit operator double()const{return double(v);}
+    OR2_X87_INLINE explicit operator long double()const{return static_cast<long double>(v);}
+    OR2_X87_INLINE X87& operator+=(X87 b){v=x87_add(v,b.v);return *this;}
+    OR2_X87_INLINE X87& operator-=(X87 b){v=x87_sub(v,b.v);return *this;}
+    OR2_X87_INLINE X87& operator*=(X87 b){v=x87_mul(v,b.v);return *this;}
+    OR2_X87_INLINE X87& operator/=(X87 b){v=x87_div(v,b.v);return *this;}
 private:
     template<class T> static constexpr x87_value_t x_value(T x){return static_cast<x87_value_t>(x);}
 };
@@ -163,7 +182,11 @@ OR2_X87_INLINE bool operator<=(X87 a,X87 b){return a.v<=b.v;}
 OR2_X87_INLINE bool operator>=(X87 a,X87 b){return a.v>=b.v;}
 OR2_X87_INLINE bool operator==(X87 a,X87 b){return a.v==b.v;}
 OR2_X87_INLINE bool operator!=(X87 a,X87 b){return a.v!=b.v;}
+#if OR2_X87_VITA
+OR2_X87_INLINE X87 x87_abs(X87 a){return X87(__builtin_fabsf(a.v));}
+#else
 OR2_X87_INLINE X87 x87_abs(X87 a){return X87(std::fabs(a.v));}          // FABS: exact
+#endif
 OR2_X87_INLINE X87 x87_sqrt(X87 a){return X87(x87_sqrt_op(a.v));}
 // Stores (FST/FSTP m32/m64): round to the destination format.
 OR2_X87_INLINE float x87_float(X87 a){return float(a.v);}
@@ -171,14 +194,29 @@ OR2_X87_INLINE double x87_double(X87 a){return double(a.v);}
 // FISTP m32/m64 under the CRT's _ftol2 (truncation); out of range or NaN
 // gives the integer indefinite value.
 OR2_X87_INLINE std::int32_t x87_ftol32(X87 a){
+#if OR2_X87_VITA
+    return static_cast<std::int32_t>(a.v);
+#else
     if(!(a.v>-2147483649.0&&a.v<2147483648.0))return std::numeric_limits<std::int32_t>::min();
     return static_cast<std::int32_t>(a.v);
+#endif
 }
 OR2_X87_INLINE std::int64_t x87_ftol64(X87 a){
+#if OR2_X87_VITA
+    return static_cast<std::int64_t>(a.v);
+#else
     if(!(a.v>=-9223372036854775808.0&&a.v<9223372036854775808.0))return std::numeric_limits<std::int64_t>::min();
     return static_cast<std::int64_t>(a.v);
+#endif
 }
 // Transcendentals: the precision control does not apply.
+#if OR2_X87_VITA
+OR2_X87_INLINE X87 x87_sin(X87 a){return X87(__builtin_sinf(a.v));}
+OR2_X87_INLINE X87 x87_cos(X87 a){return X87(__builtin_cosf(a.v));}
+OR2_X87_INLINE X87 x87_tan(X87 a){return X87(__builtin_tanf(a.v));}
+OR2_X87_INLINE X87 x87_atan2(X87 y,X87 x){return X87(__builtin_atan2f(y.v,x.v));}
+OR2_X87_INLINE bool x87_set_control(std::uint16_t){return true;}
+#else
 X87 x87_sin(X87);
 X87 x87_cos(X87);
 X87 x87_tan(X87);                 // FPTAN result (ST1)
@@ -186,4 +224,5 @@ X87 x87_atan2(X87 y,X87 x);       // FPATAN: atan(ST1/ST0)
 // Selects the precision matching an x87 control word (0x007F/0x027F/0x037F).
 // The fast build only models 0x007F and returns false for the others.
 bool x87_set_control(std::uint16_t control_word);
+#endif
 }

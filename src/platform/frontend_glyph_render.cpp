@@ -16,7 +16,11 @@ bool frontend_glyph_quad(const FrontendGlyph& g,const GameUiTexture& t,FrontendG
     const int right=source_right-(source_right-g.left>2?1:0);
     const float x1=g.x+float(right-g.left)*g.scale_x,y1=g.y+float(source_bottom-g.top)*g.scale_y;
     if(!std::isfinite(x1)||!std::isfinite(y1))return false;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    constexpr float half_y = 1.0f, half_x = 1.0f;
+#else
     constexpr float half_y=.90f,half_x=.90f*(640.f/480.f)/(1280.f/720.f);
+#endif
     const std::array<float,4> rgba{{float((g.color>>16)&255)/255.f,float((g.color>>8)&255)/255.f,
                                   float(g.color&255)/255.f,float(g.color>>24)/255.f}};
     for(unsigned i=0;i<4;++i){const bool r=i==1||i==2,b=i>=2;auto& v=out[i];

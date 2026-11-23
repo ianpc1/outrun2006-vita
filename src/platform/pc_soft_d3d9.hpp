@@ -127,6 +127,32 @@ public:
     std::uint32_t width()const{return width_;}
     std::uint32_t height()const{return height_;}
     const std::vector<std::uint8_t>& rgba()const{return colour_;}
+    struct Hw2dVertex {
+        float x,y,u,v;
+        std::uint8_t r,g,b,a;
+    };
+    struct Hw2dBatch {
+        std::uint32_t tex_handle{};
+        const std::uint8_t* tex_rgba{};
+        std::uint32_t tex_w{},tex_h{};
+        std::uint8_t blend_mode{};
+        bool has_clip{};
+        int clip_x{},clip_y{},clip_w{},clip_h{};
+        std::uint32_t first_vertex{},vertex_count{};
+        std::uint32_t first_index{},index_count{};
+    };
+    struct Hw2dLayer {
+        std::vector<Hw2dVertex> vertices;
+        std::vector<int> indices;
+        std::vector<Hw2dBatch> batches;
+        void clear(){vertices.clear();indices.clear();batches.clear();}
+    };
+    void begin_frame_hw2d();
+    void flush_pending_clear();
+    const Hw2dLayer& hw_2d_back()const{return hw_2d_back_;}
+    const Hw2dLayer& hw_2d_front()const{return hw_2d_front_;}
+    bool has_3d_draws()const{return has_3d_draws_;}
+    std::vector<std::uint32_t>& released_textures(){return released_textures_;}
     std::vector<std::string> errors;
     std::uint64_t pixels_shaded{},triangles_drawn{},pixels_depth_rejected{};
     // Host CPU benchmark (host_nro OR2_HOST_BENCH): draws stop after the state
@@ -167,7 +193,7 @@ protected:
     std::uint32_t surface_of(std::uint32_t texture,std::uint32_t face,std::uint32_t level);
     Object* object(std::uint32_t h){return h&&h<=objects_.size()&&objects_[h-1].refs?&objects_[h-1]:nullptr;}
     void rebind(std::uint32_t& slot,std::uint32_t handle);
-    struct Vertex { float pos[4]; pc_shader::V4 d[2],t[8];float fog; };
+    struct Vertex { float pos[4]; pc_shader::V4 d[1],t[2];float fog; };
     bool shade_vertex(std::uint32_t index,std::int32_t base,Vertex&);
     void triangle(const Vertex&,const Vertex&,const Vertex&);
     virtual void raster(const Vertex*,unsigned n);
@@ -184,5 +210,11 @@ protected:
     bool pretransformed_{};     // raster(): Vertex::pos is x,y,z,rhw in pixels
     std::vector<Vertex> up_vertices_; // DrawPrimitiveUP decode buffer (reused)
     PcSoftD3DXSprite sprite_{*this};
+    Hw2dLayer hw_2d_back_,hw_2d_front_;
+    bool has_3d_draws_{false};
+    bool clear_pending_{false};
+    std::uint32_t pending_clear_flags_{},pending_clear_colour_{},pending_clear_stencil_{};
+    float pending_clear_z_{1.f};
+    std::vector<std::uint32_t> released_textures_;
 };
 }

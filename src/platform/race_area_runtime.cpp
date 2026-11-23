@@ -1,7 +1,22 @@
 #include <cstddef>
+#include <cstdio>
 #include "system/dev_hooks.hpp"
 #include "system/perf.hpp"
 #include <cstdlib>
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
+#include <deque>
+#include <mutex>
+#include <unordered_set>
+#define VITA_LOG(fmt, ...) do { \
+    std::printf(fmt, ##__VA_ARGS__); \
+    outrun::vita_profile::log_message(fmt, ##__VA_ARGS__); \
+} while(0)
+#else
+#define VITA_LOG(fmt, ...) std::printf(fmt, ##__VA_ARGS__)
+#endif
 #include "platform/bulk_fallback.hpp"
 #include "platform/race_area_runtime.hpp"
 #include "platform/race_robots_runtime.hpp"
@@ -57,6 +72,114 @@ bool race_manager_service(std::uint32_t pc){
     default:return false;
     }
 }
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+// Core 2 background .sz reader + zlib inflater for 448AD0 queue_bank() calls.
+// Keeps Core 1 free of 130-400 ms synchronous SD/inflate stalls before stage transitions.
+struct VitaSzLoader {
+    struct Req { std::uint32_t id; std::string path; };
+    struct Res { std::uint32_t id; std::vector<std::uint8_t> pmt; bool ok; };
+    std::mutex mtx;
+    std::deque<Req> reqs;
+    std::deque<Res> ready;
+    std::unordered_set<std::uint32_t> pending;
+    SceUID sema{-1};
+    SceUID thid{-1};
+    bool started{false};
+
+    static int worker_entry(SceSize, void* arg) {
+        auto* self = *static_cast<VitaSzLoader**>(arg);
+        for (;;) {
+            sceKernelWaitSema(self->sema, 1, nullptr);
+            Req req{};
+            {
+                std::lock_guard<std::mutex> lk(self->mtx);
+                if (self->reqs.empty()) continue;
+                req = std::move(self->reqs.front());
+                self->reqs.pop_front();
+            }
+            const SceUInt64 t0 = sceKernelGetProcessTimeWide();
+            std::vector<std::uint8_t> compressed, inflated;
+            bool ok = false;
+            try {
+                std::FILE* f = std::fopen(req.path.c_str(), "rb");
+                if (f) {
+                    if (std::fseek(f, 0, SEEK_END) == 0) {
+                        const long len = std::ftell(f);
+                        if (len > 0 && len <= 64 * 1024 * 1024) {
+                            std::rewind(f);
+                            compressed.resize(std::size_t(len));
+                            if (std::fread(compressed.data(), 1, compressed.size(), f) == compressed.size()) {
+                                std::string err;
+                                ok = retail_asset_inflate_sz(compressed, inflated, &err);
+                            }
+                        }
+                    }
+                    std::fclose(f);
+                }
+            } catch (...) {
+                ok = false;
+                inflated.clear();
+            }
+            outrun::vita_profile::g_core2_busy_us.fetch_add(sceKernelGetProcessTimeWide() - t0, std::memory_order_relaxed);
+            {
+                std::lock_guard<std::mutex> lk(self->mtx);
+                self->ready.push_back({req.id, std::move(inflated), ok});
+                self->pending.erase(req.id);
+            }
+        }
+        return 0;
+    }
+
+    void ensure_started() {
+        if (started) return;
+        started = true;
+        sema = sceKernelCreateSema("or2_sz_sema", 0, 0, 256, nullptr);
+        thid = sceKernelCreateThread("or2_sz_loader", worker_entry, 0x10000100, 0x20000, 0, SCE_KERNEL_CPU_MASK_USER_2, nullptr);
+        VitaSzLoader* self = this;
+        if (thid >= 0) sceKernelStartThread(thid, sizeof(self), &self);
+    }
+
+    bool enqueue(std::uint32_t id, std::string full_path) {
+        if (full_path.empty()) return false;
+        ensure_started();
+        if (thid < 0 || sema < 0) return false;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (pending.count(id)) return true;
+            pending.insert(id);
+            reqs.push_back({id, std::move(full_path)});
+        }
+        sceKernelSignalSema(sema, 1);
+        return true;
+    }
+
+    bool is_pending(std::uint32_t id) {
+        std::lock_guard<std::mutex> lk(mtx);
+        return pending.count(id) != 0u;
+    }
+
+    void drain(PcSceneRenderer& r) {
+        std::deque<Res> local;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (ready.empty()) return;
+            local.swap(ready);
+        }
+        for (auto& item : local) {
+            if (item.ok && !item.pmt.empty() && !r.bank_loaded(item.id) && !r.bank_queued(item.id)) {
+                std::string err;
+                (void)r.queue_bank(item.id, std::move(item.pmt), err);
+            }
+        }
+    }
+};
+VitaSzLoader& vita_sz_loader() { static VitaSzLoader s; return s; }
+std::string vita_normalize_rel(std::string p) {
+    for (char& ch : p) if (ch == '\\') ch = '/';
+    while (!p.empty() && p.front() == '/') p.erase(p.begin());
+    return p;
+}
+#endif
 struct Service {
     NativeRuntimeContext& c;
     NativeRaceAreaRuntime& o;
@@ -268,8 +391,14 @@ struct Service {
             if(a[0]>=0x223u)return 0u;
             const auto path=resource_path(a[0]);
             std::string error;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            // Offload .sz read + zlib inflate to Core 2 via queue_bank() instead of blocking Core 1 for 200ms+.
+            if(path.empty()||!retail())
+                return missing(0x448ad0u,"resource "+hex(a[0])+" path "+path+" unreadable");
+#else
             if(path.empty()||!retail()||!retail_asset_guest_path(*retail(),path,true,&error))
                 return missing(0x448ad0u,"resource "+hex(a[0])+" path "+path+" unreadable");
+#endif
             o.requested.insert(a[0]);o.released.erase(a[0]);
             queue_bank(a[0]);return 0u;}
         case 0x4299c0:case 0x42dfb0:routed(pc);return 0u;   // 2D / model bank release (area end): the runtime keeps its banks resident
@@ -339,6 +468,21 @@ struct Service {
         case 0x43de50:routed(pc);release_collision_43de50(a[0]);return 0u;
         case 0x44a1a0:routed(pc);native_scene_owner_environment_reset_44a080(c);return 0u;   // 440CD0 x3 then 44A080
         case 0x46c4d0:routed(pc);return resources_481590();
+        case 0x46c240:case 0x46c250:case 0x46c380:case 0x46c260:case 0x46c2c0:case 0x46c4c0:
+            {
+                static int g_area_pending = 0;
+                ++g_area_pending;
+                std::uint32_t eax{};
+                bool called = false;
+                if(ctx&&native_race_requests_call(c,ctx->matrices,pc,{a[0],a[1]},eax,0u)){
+                    called = true;
+                }
+                routed(pc);
+                std::uint32_t ret = called ? eax : (pc == 0x46c380u || pc == 0x46c250u ? 0u : 1u);
+                --g_area_pending;
+                VITA_LOG("[RACE_REQ] Opcode 0x%x called, pending: %d\n", pc, g_area_pending);
+                return ret;
+            }
         // 4F03A0(&table, lane) (variant 5, after 46C380): 440CD0 of the lane's handle, then the
         // handle = [table] (the request manager's copy of the lane 0 placements, in its heap).
         case 0x4f03a0:{
@@ -545,11 +689,27 @@ struct Service {
     // frame (PcSceneRenderer::step_banks), as the PC loads it in the background.
     void queue_bank(std::uint32_t id){
         if(!r||r->bank_loaded(id)||r->bank_queued(id))return;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        if(retail()){
+            const auto rel=vita_normalize_rel(resource_path(id));
+            if(!rel.empty()){
+                const auto full=retail_asset_path(*retail(),rel);
+                if(vita_sz_loader().enqueue(id,full))return;
+            }
+        }
+#endif
         std::vector<std::uint8_t> pmt;std::string error;
         if(bank_bytes(id,pmt,error))(void)r->queue_bank(id,std::move(pmt),error);
     }
     bool ensure_bank(std::uint32_t id){
         if(!r)return false;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        vita_sz_loader().drain(*r);
+        while(vita_sz_loader().is_pending(id)){
+            sceKernelDelayThread(500);
+            vita_sz_loader().drain(*r);
+        }
+#endif
         if(r->bank_loaded(id))return true;
         if(!resident(id)){++o.skipped_objects;++o.skipped_ids[id];return false;}
         std::vector<std::uint8_t> pmt;std::string error;
@@ -638,7 +798,52 @@ void sync_start_lanes(NativeRuntimeContext& c,NativeRaceAreaRuntime& o){
 }
 void rebuild(NativeRuntimeContext& c,NativeRaceAreaRuntime& o,PcSceneRenderer* r){
     OR2_PERF_ZONE("area rebuild");
-    auto& m=o.memory;m.clear();
+    auto& m=o.memory;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    // Structural fast-path: skip clearing/remapping 160+ regions & flushing the 64-entry TLB
+    // whenever no mapped base pointer, allocation, lane image, or table has changed.
+    find_table(c, o);
+    auto mix = [](std::uint64_t h, std::uint64_t v) -> std::uint64_t {
+        h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+        return h;
+    };
+    std::uint64_t sig = 0x517cc1b727220a95ull;
+    sig = mix(sig, reinterpret_cast<std::uintptr_t>(&o));
+    sig = mix(sig, o.allocations.size());
+    sig = mix(sig, o.next_allocation);
+    sig = mix(sig, o.retired_images.size());
+    sig = mix(sig, c.event_state.slots[8].work_token);
+    sig = mix(sig, c.event_state.slots[391].work_token);
+    sig = mix(sig, reinterpret_cast<std::uintptr_t>(o.table));
+    sig = mix(sig, o.table_bytes);
+    sig = mix(sig, r ? 1ull : 0ull);
+    sig = mix(sig, reinterpret_cast<std::uintptr_t>(c.race_effects.glow_8a8c18));
+    sig = mix(sig, c.race_traffic ? (c.race_traffic->requests_cells.size() + (c.race_traffic->requests_heap ? 1000u : 0u)) : 0u);
+    for (unsigned l = 0; l < 3u; ++l) {
+        sig = mix(sig, reinterpret_cast<std::uintptr_t>(o.placements[l].image.data()));
+        sig = mix(sig, o.placements[l].image.size());
+        sig = mix(sig, reinterpret_cast<std::uintptr_t>(o.dynamics[l].image.data()));
+        sig = mix(sig, o.dynamics[l].image.size());
+    }
+    static std::uint64_t s_last_area_sig = 0;
+    if (sig == s_last_area_sig && !m.regions().empty()) {
+        o.memory_frame = c.completed_frames + 1u;
+        o.globals_78024c_780258_78026c = {c.start_mode.course_preset, c.game_mode.game_variant, c.mode_state.current};
+        mirror_events(c, o);
+        if (c.race_traffic) {
+            const std::uint32_t ms = c.start_mode.manager_state_7f94c0;
+            std::memcpy(c.race_traffic->requests_7f9460.data() + 0x60u, &ms, 4);
+        }
+        if (r) {
+            const auto v = r->flush_context().g.matrix(0x95dba0u);
+            std::memcpy(o.view_inverse_95dba0.data(), v.data(), 64);
+            o.view_inverse_valid = true;
+        }
+        return;
+    }
+    s_last_area_sig = sig;
+#endif
+    m.clear();
     o.memory_frame=c.completed_frames+1u;   // race manager binding: rebuilt this frame
     for(std::size_t i=0;i<EmbeddedExeRangeCount;++i)m.map_const(EmbeddedExeRanges[i].base,EmbeddedExeRanges[i].data,EmbeddedExeRanges[i].size);
     native_race_requests_map(c,m);   // the C2C request manager 7F9460 (variant 5) and its heap; the words below shadow it
@@ -758,13 +963,20 @@ std::uint32_t execute(NativeRaceAreaRuntime& o,Service& sv,PcSceneRenderer& r,co
             if(o.lod_stack_899560.empty()){driving::pc_matrix_pop(q.matrices);throw std::runtime_error("4044C0 without a 4044A0");}
             q.lod_threshold_8999b8=o.lod_stack_899560.back();o.lod_stack_899560.pop_back();break;
         case 0x405350u:{
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            outrun::vita_profile::FlushScope fs;
+#endif
             std::vector<std::uint32_t> order(q.opaque.count);
             for(std::uint32_t k=0;k<q.opaque.count;++k)order[k]=k;
             render_queue_flush_405890(f,q.opaque,order);break;}
         case 0x4044f0u:render_pass_record_4044f0(f.g,a[0],a[1],a[2],a[3],a[4]);break;
         case 0x404540u:render_pass_defaults_404540(f.g,r.frame().layer_7d25f0);break;
         case 0x4052b0u:render_queue_mode_4052b0(q);break;
-        case 0x4052c0u:render_queue_flush_4052c0(f,q);break;
+        case 0x4052c0u:{
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            outrun::vita_profile::FlushScope fs;
+#endif
+            render_queue_flush_4052c0(f,q);break;}
         case 0x409df0u:{                                                               // 409DF0(slot): 410F90(current, slot)
             std::array<float,16> mt{};for(unsigned k=0;k<16;++k)std::memcpy(&mt[k],call.matrix.data()+k*4,4);
             render_set_matrix_410f90(f,mt,a[0]);break;}
@@ -966,11 +1178,20 @@ bool native_race_area_display(NativeRuntimeContext& c,PcSceneRenderer& r,std::ui
     if(area?!o.initialized:!o.sky_initialized){++o.aborts[area?"44F120 without a completed 44CB00":"4521C0 without a completed 451A30"];
         ++(area?o.display_aborts:o.sky_display_aborts);return true;}
     o.frame=c.completed_frames;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    if(area){vita_sz_loader().drain(r);r.step_banks(4.0);}  // drain Core 2 .sz loads & upload queued stage banks ahead of transitions
+#else
     if(area)r.step_banks(1.5);                              // the queued 448AD0 banks (port)
+#endif
     hook_colours(c,o,r);
     sync_start_lanes(c,o);
     rebuild(c,o,&r);
     Service sv{c,o,&r};
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    // Pre-warm traffic car archive (id=14, CARS/obj_othcar_pmt.sz) on Core 2 at race start
+    // so it doesn't stall Core 1 for ~1050 ms when the first traffic car enters view.
+    if (area && o.displays == 0u) sv.queue_bank(14u);
+#endif
     auto& draws=o.draw_list;draws.clear();                  // reused: no per-frame allocation
     auto& matrices=r.matrices();
     PcRaceContext ctx{o.memory,matrices,[&sv](const PcRaceCall& k){return sv(k);},&draws};

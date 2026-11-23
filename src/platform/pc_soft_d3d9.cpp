@@ -49,6 +49,7 @@ void PcSoftD3D9Device::release(std::uint32_t handle){
     auto* o=object(handle);if(!o||--o->refs)return;
     const auto parent=o->parent;
     if(parent){const auto key=(std::uint64_t(parent)<<16)|(o->face<<8)|o->level;surfaces_.erase(key);}
+    if(o->kind==KTexture)released_textures_.push_back(handle);
     // Never recycle handles: stale references must not acquire a new object.
     ++released_kinds[o->kind&15u];
     *o=Object{};o->refs=0;
@@ -113,8 +114,39 @@ void PcSoftD3D9Device::clear(std::uint32_t argb,float depth){
         depth_[k]=depth;
     }
 }
+void PcSoftD3D9Device::begin_frame_hw2d(){
+    hw_2d_back_.clear();
+    hw_2d_front_.clear();
+    has_3d_draws_=false;
+    clear_pending_=false;
+}
+void PcSoftD3D9Device::flush_pending_clear(){
+    if(!clear_pending_||colour_target_!=BackBuffer)return;
+    clear_pending_=false;
+    const std::uint32_t col=pending_clear_colour_&0x00ffffffu;
+    if(pending_clear_flags_&1u)for(std::size_t k=0;k*4<colour_.size();++k){colour_[k*4]=std::uint8_t(col>>16);colour_[k*4+1]=std::uint8_t(col>>8);colour_[k*4+2]=std::uint8_t(col);colour_[k*4+3]=std::uint8_t(col>>24);}
+    if(pending_clear_flags_&2u)for(auto& d:depth_)d=pending_clear_z_;
+    if(pending_clear_flags_&4u)for(auto& v:stencil_)v=std::uint8_t(pending_clear_stencil_);
+}
 void PcSoftD3D9Device::clear(std::uint32_t flags,std::uint32_t colour,float z,std::uint32_t stencil){
     if(count_only)return;
+#if defined(__VITA__) || defined(__psp2__)
+    if(colour_target_==BackBuffer&&!has_3d_draws_){
+        if(!clear_pending_){
+            clear_pending_=true;
+            pending_clear_flags_=flags;
+            pending_clear_colour_=colour;
+            pending_clear_z_=z;
+            pending_clear_stencil_=stencil;
+        }else{
+            pending_clear_flags_|=flags;
+            if(flags&1u)pending_clear_colour_=colour;
+            if(flags&2u)pending_clear_z_=z;
+            if(flags&4u)pending_clear_stencil_=stencil;
+        }
+        return;
+    }
+#endif
     if(flags&1u)for(std::size_t k=0;k*4<colour_.size();++k){colour_[k*4]=std::uint8_t(colour>>16);colour_[k*4+1]=std::uint8_t(colour>>8);colour_[k*4+2]=std::uint8_t(colour);colour_[k*4+3]=std::uint8_t(colour>>24);}
     if(flags&2u)for(auto& d:depth_)d=z;
     if(flags&4u)for(auto& v:stencil_)v=std::uint8_t(stencil);
@@ -152,37 +184,51 @@ std::uint32_t PcSoftD3D9Device::create_pixel_shader(const std::uint32_t* t){
 std::uint32_t PcSoftD3D9Device::create_texture_from_file(const PcTextureFileRequest& q){
     Object o;o.kind=KTexture;std::string error;
     if(!pc_d3dx_texture_from_file(q,o.texture,error)){errors.push_back(error);return 0;}
+#if defined(OR2_VITA_GL)
+    if(!o.texture.faces.empty()&&!o.texture.faces[0].empty()){
+        o.texture.faces.resize(1);
+        o.texture.faces[0].resize(1);
+        texture_bytes+=o.texture.faces[0][0].data.size();
+    }
+#else
     for(const auto& f:o.texture.faces)for(const auto& l:f)texture_bytes+=l.data.size();
     o.rgba.resize(o.texture.faces.size());
     for(unsigned f=0;f<o.texture.faces.size();++f)for(unsigned l=0;l<o.texture.faces[f].size();++l)o.rgba[f].push_back(pc_dds_rgba(o.texture,f,l));
+#endif
     objects_.push_back(std::move(o));return std::uint32_t(objects_.size());}
 bool PcSoftD3D9Device::shade_vertex(std::uint32_t index,std::int32_t base,Vertex& out){
     auto* decl=object(declaration);auto* vs=object(vertex_shader);
     if(!decl||!vs||vs->kind!=KVs)return false;
-    pc_shader::VsState s;std::array<V4,256> c;
-    for(unsigned k=0;k<256;++k)c[k]={vs_constants[k][0],vs_constants[k][1],vs_constants[k][2],vs_constants[k][3]};
-    s.C=c.data();
+    pc_shader::VsState s;
+    s.C=reinterpret_cast<const V4*>(vs_constants.data());
     for(auto& v:s.V)v={0,0,0,1};
+    const std::int64_t vidx=std::int64_t(base)+index;
+    if(vidx<0)return false;
     for(const auto& e:decl->elements){
         if(e.stream==PcDeclEndStream)break;
-        const auto& st=streams.at(e.stream);auto* b=object(st.buffer);if(!b)return false;
-        const std::size_t at=std::size_t(st.offset)+std::size_t(std::int64_t(base)+index)*st.stride+e.offset;
-        V4 v{0,0,0,1};
-        auto rd=[&](unsigned k){float f;std::memcpy(&f,b->bytes.data()+at+k*4,4);return f;};
+        if(e.stream>=streams.size())return false;
+        const auto& st=streams[e.stream];auto* b=object(st.buffer);if(!b)return false;
+        const std::size_t at=std::size_t(st.offset)+std::size_t(vidx)*st.stride+e.offset;
         const unsigned need=e.type<=3?4u*(e.type+1u):4u;
         if(at+need>b->bytes.size())return false;
+        const auto* p=b->bytes.data()+at;
+        V4 v{0,0,0,1};
+        const auto* fp=reinterpret_cast<const float*>(p);
         switch(e.type){
-        case 0:v={rd(0),0,0,1};break;case 1:v={rd(0),rd(1),0,1};break;case 2:v={rd(0),rd(1),rd(2),1};break;case 3:v={rd(0),rd(1),rd(2),rd(3)};break;
-        case 4:{const auto* p=b->bytes.data()+at;v={p[2]/255.f,p[1]/255.f,p[0]/255.f,p[3]/255.f};break;}
-        case 5:{const auto* p=b->bytes.data()+at;v={float(p[0]),float(p[1]),float(p[2]),float(p[3])};break;}
+        case 0:v={fp[0],0.f,0.f,1.f};break;
+        case 1:v={fp[0],fp[1],0.f,1.f};break;
+        case 2:v={fp[0],fp[1],fp[2],1.f};break;
+        case 3:v={fp[0],fp[1],fp[2],fp[3]};break;
+        case 4:{static constexpr float inv255=1.f/255.f;v={p[2]*inv255,p[1]*inv255,p[0]*inv255,p[3]*inv255};break;}
+        case 5:{v={float(p[0]),float(p[1]),float(p[2]),float(p[3])};break;}
         default:break;
         }
         for(const auto& in:vs->program.inputs)if(in.usage==e.usage&&in.usage_index==e.usage_index)s.V[in.reg]=v;
     }
     pc_shader_run_vs(vs->program,s);
-    std::memcpy(out.pos,&s.oPos,16);
-    out.d[0]=pc_shader::sat(s.oD[0]);out.d[1]=pc_shader::sat(s.oD[1]);
-    for(unsigned k=0;k<8;++k)out.t[k]=s.oT[k];
+    out.pos[0]=s.oPos.x;out.pos[1]=s.oPos.y;out.pos[2]=s.oPos.z;out.pos[3]=s.oPos.w;
+    out.d[0]=pc_shader::sat(s.oD[0]);
+    out.t[0]=s.oT[0];
     out.fog=pc_shader::clamp01(s.oFog.x);
     return true;
 }
@@ -217,6 +263,10 @@ std::uint32_t PcSoftD3D9Device::draw_indexed_primitive(std::uint32_t type,std::i
             if(dbg_me>=lo&&dbg_me<=hi)keep=true;
             p+=n;if(*p==',')++p;}
         if(!keep)return 0;}
+    if(colour_target_==BackBuffer){
+        flush_pending_clear();
+        if((render[d3d9::RS_COLORWRITEENABLE]&7u)!=0u)has_3d_draws_=true;
+    }
     float bmin[3]{1e30f,1e30f,1e30f},bmax[3]{-1e30f,-1e30f,-1e30f};std::uint32_t culled_w=0;
     for(std::uint32_t p=0;p<count;++p){
         std::uint32_t a,b,c;
@@ -239,7 +289,7 @@ void PcSoftD3D9Device::triangle(const Vertex& a,const Vertex& b,const Vertex& c)
     std::vector<Vertex> poly{a,b,c};
     auto lerpv=[](const Vertex& p,const Vertex& q,float t){Vertex r;
         for(unsigned k=0;k<4;++k)r.pos[k]=p.pos[k]+(q.pos[k]-p.pos[k])*t;
-        for(unsigned k=0;k<2;++k)r.d[k]=lerp4(p.d[k],q.d[k],t);for(unsigned k=0;k<8;++k)r.t[k]=lerp4(p.t[k],q.t[k],t);
+        r.d[0]=lerp4(p.d[0],q.d[0],t);r.t[0]=lerp4(p.t[0],q.t[0],t);
         r.fog=p.fog+(q.fog-p.fog)*t;return r;};
     for(int plane=0;plane<2;++plane){
         std::vector<Vertex> out;
@@ -301,9 +351,11 @@ void PcSoftD3D9Device::raster(const Vertex* v,unsigned n){
             float z=l0*A.z+l1*B.z+l2*C.z+bias;
             const float iw=l0*A.iw+l1*B.iw+l2*C.iw;
             // Varyings and their screen gradients (texture LOD).
-            V4 d0=attr(l0,l1,l2,[](const Vertex& q){return q.d[0];}),d1=attr(l0,l1,l2,[](const Vertex& q){return q.d[1];});
-            std::array<V4,8> tc,tx,ty;float gx0,gx1,gx2,gy0,gy1,gy2;bary(x+1.f,y,gx0,gx1,gx2);bary(x,y+1.f,gy0,gy1,gy2);
-            for(unsigned k=0;k<8;++k){auto get=[k](const Vertex& q){return q.t[k];};tc[k]=attr(l0,l1,l2,get);tx[k]=attr(gx0,gx1,gx2,get);ty[k]=attr(gy0,gy1,gy2,get);}
+            V4 d0=attr(l0,l1,l2,[](const Vertex& q){return q.d[0];}),d1={0,0,0,0};
+            std::array<V4,8> tc{},tx{},ty{};float gx0,gx1,gx2,gy0,gy1,gy2;bary(x+1.f,y,gx0,gx1,gx2);bary(x,y+1.f,gy0,gy1,gy2);
+            tc[0]=attr(l0,l1,l2,[](const Vertex& q){return q.t[0];});
+            tx[0]=attr(gx0,gx1,gx2,[](const Vertex& q){return q.t[0];});
+            ty[0]=attr(gy0,gy1,gy2,[](const Vertex& q){return q.t[0];});
             const float fog_v=[&]{const float w0=l0*A.iw,w1=l1*B.iw,w2=l2*C.iw;return (v[o[0]].fog*w0+v[o[1]].fog*w1+v[o[2]].fog*w2)/iw;}();
             // Pixel shader.
             V4 colour{};
@@ -388,6 +440,13 @@ void PcSoftD3D9Device::raster(const Vertex* v,unsigned n){
             }
             const auto mask=render[d3d9::RS_COLORWRITEENABLE];
             for(unsigned k=0;k<4;++k)if(mask>>k&1u)px_out[k]=std::uint8_t(std::lround(res[k]*255.f));
+#if defined(__VITA__) || defined(__psp2__)
+            if(colour_target_==BackBuffer&&(mask&7u)!=0u){
+                if(!render[d3d9::RS_ALPHABLENDENABLE]||px_out[3]==0u){
+                    px_out[3]=std::uint8_t(std::clamp(int(res[3]*255.f+0.5f),1,255));
+                }
+            }
+#endif
         }
     }
 }
@@ -510,12 +569,11 @@ void PcSoftD3D9Device::draw_primitive_up(std::uint32_t type,std::uint32_t count,
     // Vertex shader with FVF inputs: POSITION 0, NORMAL 3, COLOR 10 (0/1), TEXCOORD 5 (set).
     auto* vs=rhw?nullptr:object(vertex_shader);
     if(vs&&vs->kind!=KVs)vs=nullptr;
-    std::array<V4,256> vc;
-    if(vs)for(unsigned k=0;k<256;++k)vc[k]={vs_constants[k][0],vs_constants[k][1],vs_constants[k][2],vs_constants[k][3]};
+    const auto* vc=reinterpret_cast<const V4*>(vs_constants.data());
     const std::size_t normal_at=(fvf&0x010u)?12u:none;
     for(std::size_t i=0;vs&&i<total;++i){
         const auto* p=bytes+i*stride;Vertex& v=up_vertices_[i];v=Vertex{};
-        pc_shader::VsState s;s.C=vc.data();for(auto& r:s.V)r={0,0,0,1};
+        pc_shader::VsState s;s.C=vc;for(auto& r:s.V)r={0,0,0,1};
         auto input=[&](std::uint8_t usage,std::uint8_t index,const V4& value){
             for(const auto& in:vs->program.inputs)if(in.usage==usage&&in.usage_index==index)s.V[in.reg]=value;};
         input(0,0,{rdf(p),rdf(p+4),rdf(p+8),1.f});
@@ -525,8 +583,8 @@ void PcSoftD3D9Device::draw_primitive_up(std::uint32_t type,std::uint32_t count,
         for(unsigned k=0;k<sets;++k){V4 t{0,0,0,1};for(unsigned q=0;q<tex_n[k];++q)t[q]=rdf(p+tex_at[k]+4*q);input(5,std::uint8_t(k),t);}
         pc_shader_run_vs(vs->program,s);
         std::memcpy(v.pos,&s.oPos,16);
-        v.d[0]=pc_shader::sat(s.oD[0]);v.d[1]=pc_shader::sat(s.oD[1]);
-        for(unsigned k=0;k<8;++k)v.t[k]=s.oT[k];
+        v.d[0]=pc_shader::sat(s.oD[0]);
+        v.t[0]=s.oT[0];
         v.fog=pc_shader::clamp01(s.oFog.x);
     }
     for(std::size_t i=0;!vs&&i<total;++i){
@@ -535,12 +593,137 @@ void PcSoftD3D9Device::draw_primitive_up(std::uint32_t type,std::uint32_t count,
         else{const float x=rdf(p),y=rdf(p+4),z=rdf(p+8);                     // fixed-function transform (no lighting)
             for(unsigned k=0;k<4;++k)v.pos[k]=x*wvp[k]+y*wvp[4+k]+z*wvp[8+k]+wvp[12+k];}
         v.d[0]=diffuse_at!=none?colour(p+diffuse_at):V4{1,1,1,1};
-        // Specular alpha is the vertex fog factor.
-        if(specular_at!=none){v.d[1]=colour(p+specular_at);v.fog=v.d[1].w;v.d[1].w=0.f;}else{v.d[1]={0,0,0,0};v.fog=1.f;}
-        for(unsigned k=0;k<sets;++k){V4 t{0,0,0,1};for(unsigned c=0;c<tex_n[k];++c)t[c]=rdf(p+tex_at[k]+4*c);v.t[k]=t;}
+        v.fog=1.f;
+        for(unsigned k=0;k<std::min(sets,2u);++k){
+            V4 t{0,0,0,1};
+            for(unsigned c=0;c<tex_n[k];++c)t[c]=rdf(p+tex_at[k]+4*c);
+            v.t[k]=t;
+        }
     }
     auto* ps=object(pixel_shader);
     ps_=ps&&ps->kind==KPs?&ps->program:nullptr;
+#if defined(__VITA__) || defined(__psp2__)
+    if(colour_target_==BackBuffer&&rhw&&!ps_&&render[52]==0u&&!active_queries_&&(render[d3d9::RS_COLORWRITEENABLE]&7u)==7u){
+        const bool use_stage1=(textures[1]!=0u&&stage[1][1]==2u&&stage[1][2]==2u);
+        const bool solid_diffuse=!use_stage1&&(textures[0]==0u||stage[0][1]<=1u||
+            (stage[0][1]==3u&&(stage[0][3]&0xfu)==0u)||(stage[0][1]==2u&&(stage[0][2]&0xfu)==0u));
+        const std::uint32_t th=solid_diffuse?0u:(use_stage1?textures[1]:textures[0]);
+        const std::uint8_t* trgba=nullptr;
+        std::uint32_t tw=0,th_px=0;
+        if(th!=0u){
+            auto* o=object(th);
+            if(o&&o->kind==KTexture&&!o->rgba.empty()&&!o->rgba[0].empty()&&!o->texture.faces.empty()&&!o->texture.faces[0].empty()){
+                trgba=o->rgba[0][0].data();
+                tw=o->texture.faces[0][0].width;
+                th_px=o->texture.faces[0][0].height;
+            }
+        }
+        const bool ab=render[d3d9::RS_ALPHABLENDENABLE]!=0u;
+        const std::uint32_t dst_b=render[d3d9::RS_DESTBLEND];
+        const std::uint8_t bmode=!ab?0u:(dst_b==2u?2u:1u);
+        const float sx=width_?(960.f/float(width_)):1.f;
+        const float sy=height_?(544.f/float(height_)):1.f;
+        bool has_clip=false;
+        int clip_x=0,clip_y=0,clip_w=960,clip_h=544;
+        if(use_stage1&&total>=3){
+            float xmin=1e9f,xmax=-1e9f,ymin=1e9f,ymax=-1e9f;
+            float umin=1e9f,umax=-1e9f,vmin=1e9f,vmax=-1e9f;
+            float x_umin=0.f,x_umax=0.f,y_vmin=0.f,y_vmax=0.f;
+            for(std::size_t i=0;i<total;++i){
+                const float vx=up_vertices_[i].pos[0]*sx,vy=up_vertices_[i].pos[1]*sy;
+                const float vu=up_vertices_[i].t[1].x,vv=up_vertices_[i].t[1].y;
+                xmin=std::min(xmin,vx);xmax=std::max(xmax,vx);
+                ymin=std::min(ymin,vy);ymax=std::max(ymax,vy);
+                if(vu<umin){umin=vu;x_umin=vx;}
+                if(vu>umax){umax=vu;x_umax=vx;}
+                if(vv<vmin){vmin=vv;y_vmin=vy;}
+                if(vv>vmax){vmax=vv;y_vmax=vy;}
+            }
+            if(umin<0.f||umax>1.f||vmin<0.f||vmax>1.f){
+                float cx0=xmin,cx1=xmax,cy0=ymin,cy1=ymax;
+                if(umax-umin>1e-5f){
+                    const float x0=x_umin+(0.f-umin)*(x_umax-x_umin)/(umax-umin);
+                    const float x1=x_umin+(1.f-umin)*(x_umax-x_umin)/(umax-umin);
+                    cx0=std::max(cx0,std::min(x0,x1));
+                    cx1=std::min(cx1,std::max(x0,x1));
+                }
+                if(vmax-vmin>1e-5f){
+                    const float y0=y_vmin+(0.f-vmin)*(y_vmax-y_vmin)/(vmax-vmin);
+                    const float y1=y_vmin+(1.f-vmin)*(y_vmax-y_vmin)/(vmax-vmin);
+                    cy0=std::max(cy0,std::min(y0,y1));
+                    cy1=std::min(cy1,std::max(y0,y1));
+                }
+                clip_x=std::max(0,int(std::floor(cx0)));
+                clip_y=std::max(0,int(std::floor(cy0)));
+                clip_w=std::max(0,std::min(960,int(std::ceil(cx1)))-clip_x);
+                clip_h=std::max(0,std::min(544,int(std::ceil(cy1)))-clip_y);
+                has_clip=true;
+            }
+        }
+        auto& layer=has_3d_draws_?hw_2d_front_:hw_2d_back_;
+        const bool coalesce=!layer.batches.empty()&&
+            layer.batches.back().tex_handle==th&&
+            layer.batches.back().blend_mode==bmode&&
+            layer.batches.back().has_clip==has_clip&&
+            (!has_clip||(layer.batches.back().clip_x==clip_x&&layer.batches.back().clip_y==clip_y&&
+                         layer.batches.back().clip_w==clip_w&&layer.batches.back().clip_h==clip_h));
+        const std::uint32_t base_v=std::uint32_t(layer.vertices.size());
+        const std::uint32_t batch_v0=coalesce?layer.batches.back().first_vertex:base_v;
+        const std::uint32_t local_v=base_v-batch_v0;
+        const std::uint32_t base_i=std::uint32_t(layer.indices.size());
+        const unsigned uv_set=use_stage1?1u:0u;
+        for(std::size_t i=0;i<total;++i){
+            const auto& sv=up_vertices_[i];
+            Hw2dVertex dv{};
+            dv.x=sv.pos[0]*sx;
+            dv.y=sv.pos[1]*sy;
+            dv.u=sv.t[uv_set].x;
+            dv.v=sv.t[uv_set].y;
+            if(use_stage1){
+                dv.r=255;dv.g=255;dv.b=255;
+            }else{
+                dv.r=std::uint8_t(std::clamp(int(sv.d[0].x*255.f+0.5f),0,255));
+                dv.g=std::uint8_t(std::clamp(int(sv.d[0].y*255.f+0.5f),0,255));
+                dv.b=std::uint8_t(std::clamp(int(sv.d[0].z*255.f+0.5f),0,255));
+            }
+            dv.a=std::uint8_t(std::clamp(int(sv.d[0].w*255.f+0.5f),0,255));
+            layer.vertices.push_back(dv);
+        }
+        for(std::uint32_t p=0;p<count;++p){
+            std::uint32_t a,b,c;
+            if(type==4){a=p*3u;b=a+1u;c=a+2u;}
+            else if(type==5){a=p;b=a+1u;c=a+2u;if(p&1u)std::swap(a,b);}
+            else{a=0u;b=p+1u;c=b+1u;}
+            layer.indices.push_back(int(local_v+a));
+            layer.indices.push_back(int(local_v+b));
+            layer.indices.push_back(int(local_v+c));
+        }
+        const std::uint32_t v_cnt=std::uint32_t(total);
+        const std::uint32_t i_cnt=count*3u;
+        if(coalesce){
+            auto& last=layer.batches.back();
+            last.vertex_count+=v_cnt;
+            last.index_count+=i_cnt;
+            return;
+        }
+        Hw2dBatch batch{};
+        batch.tex_handle=th;
+        batch.tex_rgba=trgba;
+        batch.tex_w=tw;
+        batch.tex_h=th_px;
+        batch.blend_mode=bmode;
+        batch.has_clip=has_clip;
+        batch.clip_x=clip_x;batch.clip_y=clip_y;batch.clip_w=clip_w;batch.clip_h=clip_h;
+        batch.first_vertex=base_v;batch.vertex_count=v_cnt;
+        batch.first_index=base_i;batch.index_count=i_cnt;
+        layer.batches.push_back(batch);
+        return;
+    }
+    if(colour_target_==BackBuffer){
+        flush_pending_clear();
+        if((render[d3d9::RS_COLORWRITEENABLE]&7u)!=0u)has_3d_draws_=true;
+    }
+#endif
     pretransformed_=rhw;
     static const bool dbg_up=std::getenv("OR2_SHADOW_DEBUG")!=nullptr;
     if(dbg_up&&fvf==0x44u){std::fprintf(stderr,"[up44] ps=%u vs=%u type=%u count=%u rs:",pixel_shader,vertex_shader,type,count);

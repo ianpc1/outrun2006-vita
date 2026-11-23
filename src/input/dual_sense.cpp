@@ -25,9 +25,15 @@ platform::NativeInputState DualSenseInput::update(const PadSample& p,std::uint32
     out.steering=axis_byte(p.left_x);
     if(held&Left)out.steering=-128;
     if(held&Right)out.steering=127;
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+    out.accelerator=(held&R1)?255u:p.r2;
+    out.brake=(held&L1)?255u:p.l2;
+    out.shift_up=(down&Cross)!=0;out.shift_down=(down&Square)!=0;
+#else
     out.accelerator=(held&Cross)?255u:p.r2;
     out.brake=(held&Circle)?255u:p.l2;
     out.shift_up=(down&R1)!=0;out.shift_down=(down&L1)!=0;
+#endif
     out.menu_left=(down&Left)!=0;out.menu_right=(down&Right)!=0;
     out.menu_up=(down&Up)!=0;out.menu_down=(down&Down)!=0;
     out.menu_confirm=(down&(Cross|Options))!=0;out.menu_cancel=(down&Circle)!=0;
@@ -55,10 +61,20 @@ platform::NativeInputState DualSenseInput::update(const PadSample& p,std::uint32
     d.axes_94[0x0d]=std::int16_t(out.accelerator);
     d.axes_94[0x0c]=std::int16_t(out.brake);
     if(held&Options)d.buttons_04|=1u;
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+    if(held&Cross)d.buttons_04|=2u;
+    if(held&Circle)d.buttons_04|=4u;
+    if(held&Square)d.buttons_04|=8u;
+#else
     if(held&R1)d.buttons_04|=2u;
     if(held&Circle)d.buttons_04|=4u;
     if(held&L1)d.buttons_04|=8u;
+#endif
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+    if(held&Triangle)d.buttons_04|=0x10u;
+#else
     if(held&Square)d.buttons_04|=0x10u;
+#endif
     if(held&Right)d.buttons_04|=0x80u;
     if(held&Left)d.buttons_04|=0x100u;
     // Match r155's result-screen confirm without shifting gear on Cross in GAME.

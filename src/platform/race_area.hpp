@@ -21,6 +21,7 @@
 #include "platform/vehicle_model_draw.hpp"
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <algorithm>
 #include <stdexcept>
@@ -44,18 +45,26 @@ public:
         regions_.resize(mark);if(mark<built_)dirty_=true;
     }
     bool mapped(std::uint32_t a,std::size_t n) const {return find(a,n)!=nullptr;}
-    std::uint8_t* at(std::uint32_t a,std::size_t n,bool write=false) const;
-    std::uint8_t u8(std::uint32_t a) const {return *at(a,1);}
-    std::int8_t i8(std::uint32_t a) const {return std::int8_t(u8(a));}
-    std::uint16_t u16(std::uint32_t a) const;
-    std::int16_t i16(std::uint32_t a) const {return std::int16_t(u16(a));}
-    std::uint32_t u32(std::uint32_t a) const;
-    std::int32_t i32(std::uint32_t a) const {return std::int32_t(u32(a));}
-    float f32(std::uint32_t a) const;
-    void put8(std::uint32_t a,std::uint8_t v) const {*at(a,1,true)=v;}
-    void put16(std::uint32_t a,std::uint16_t v) const;
-    void put32(std::uint32_t a,std::uint32_t v) const;
-    void putf(std::uint32_t a,float v) const;
+    std::uint8_t* at_slow(std::uint32_t a,std::size_t n,bool write=false) const;
+    inline std::uint8_t* at(std::uint32_t a,std::size_t n,bool write=false) const {
+        if(__builtin_expect(!dirty_&&n>0u&&(regions_.size()==built_||std::uint64_t(a)+n<=overlay_lo_||std::uint64_t(a)>=overlay_hi_),1)){
+            const auto& e=tlb_[(a>>10)&63u];
+            if(__builtin_expect(a>=e.lo&&a<e.hi&&n<=(e.hi-a)&&(!write||e.writable),1))
+                return e.data+(a-e.base);
+        }
+        return at_slow(a,n,write);
+    }
+    inline std::uint8_t u8(std::uint32_t a) const {return *at(a,1);}
+    inline std::int8_t i8(std::uint32_t a) const {return std::int8_t(u8(a));}
+    inline std::uint16_t u16(std::uint32_t a) const {std::uint16_t v;std::memcpy(&v,at(a,2),2);return v;}
+    inline std::int16_t i16(std::uint32_t a) const {return std::int16_t(u16(a));}
+    inline std::uint32_t u32(std::uint32_t a) const {std::uint32_t v;std::memcpy(&v,at(a,4),4);return v;}
+    inline std::int32_t i32(std::uint32_t a) const {return std::int32_t(u32(a));}
+    inline float f32(std::uint32_t a) const {float v;std::memcpy(&v,at(a,4),4);return v;}
+    inline void put8(std::uint32_t a,std::uint8_t v) const {*at(a,1,true)=v;}
+    inline void put16(std::uint32_t a,std::uint16_t v) const {std::memcpy(at(a,2,true),&v,2);}
+    inline void put32(std::uint32_t a,std::uint32_t v) const {std::memcpy(at(a,4,true),&v,4);}
+    inline void putf(std::uint32_t a,float v) const {std::memcpy(at(a,4,true),&v,4);}
     // Bounded writable view (matrix leaves).
     driving::Bytes bytes(std::uint32_t a,std::size_t n) const {return driving::Bytes(at(a,n,true),n);}
     const std::vector<Region>& regions() const {return regions_;}
@@ -97,6 +106,9 @@ private:
     struct Built { std::vector<Region> regions; std::vector<Piece> pieces; };
     mutable std::array<Built,4> cache_{};
     mutable std::size_t cache_next_{};
+    struct TlbEntry { std::uint32_t lo{1u},hi{0u},base{0u},writable{0u}; std::uint8_t* data{nullptr}; };
+    mutable std::array<TlbEntry,64> tlb_{};
+    void clear_tlb() const {for(auto& e:tlb_)e.hi=0u;}
 };
 // One call of a PC function outside the ported module (or a render leaf).
 struct PcRaceCall {

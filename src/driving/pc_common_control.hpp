@@ -2264,6 +2264,8 @@ std::uint32_t runtime_frame_ticks_417890(
     PcRuntimeTimingState417890& state,
     std::int32_t target_rate,
     const PcRuntimeTimingServices417890& services);
+extern std::uint32_t g_max_simulation_ticks;
+extern bool g_is_final_sim_tick;
 
 // r094: platform-neutral extraction of the central update/render block inside
 // PC 0x00417B20.  The source region 0x00417C7B..0x00417DD4 is not a standalone

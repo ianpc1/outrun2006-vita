@@ -656,420 +656,838 @@ bool native_update(NativeRuntimeContext& c){
     ++stats_.failures;return false;
 }
 }
-// ---- Options > Controls > Configuration (4D7E00 init, 4D7FB0 control, 4D6A60 display,
-// 4D6E50 close), native over the title owner (OwnerBase) and the device objects. The
-// owner's own methods and the text services go through the service of run().
-namespace {
-constexpr std::uint32_t ConfigText=0x0f4a0000u,ConfigTextSize=0x800u;   // the PC formats these on its stack
-struct ConfigScreen {
-    NativeRuntimeContext& c;State& s;PcRaceMemory& m;const PcRaceService& svc;
-    static constexpr std::uint32_t O=OwnerBase,Window=OwnerBase+0x9bc,List=OwnerBase+0x1c6c,Prompt=OwnerBase+0x1ca8;
-    static constexpr std::uint32_t Name=ConfigText,Message=ConfigText+0x400u;   // device name, 48CA40 text
-    static constexpr std::uint32_t Text84b100=0x84b100u;
-    ConfigScreen(NativeRuntimeContext& cc,State& ss,const PcRaceService& service):c(cc),s(ss),m(ss.memory),svc(service){}
-    std::uint32_t call(std::uint32_t pc,std::uint32_t ecx,std::initializer_list<std::uint32_t> args){
-        PcRaceCall k{};k.pc=pc;k.ecx=ecx;k.argc=std::uint32_t(args.size());unsigned i=0;for(auto a:args)k.args[i++]=a;return svc(k);}
-    static std::uint32_t fbits(float f){std::uint32_t u;std::memcpy(&u,&f,4);return u;}
-    std::uint32_t text(std::uint32_t id){return call(0x465eb0u,0,{id});}
-    std::uint32_t u(std::uint32_t o)const{return m.u32(O+o);}
-    std::int32_t i(std::uint32_t o)const{return std::int32_t(m.u32(O+o));}
-    void put(std::uint32_t o,std::uint32_t v){m.put32(O+o,v);}
-    std::uint32_t g(std::uint32_t a)const{return m.u32(a);}
-    std::uint32_t count()const{return s.count_95aec4;}
-    std::uint32_t dev(std::uint32_t k)const{return m.u32(0x8606d4u+k*4u);}
-    bool keyboard(std::uint32_t d)const{return m.u32(d)==KeyboardVtable;}
-    std::uint32_t timer()const{return m.u32(0x692c98u);}
-    void set_timer(std::uint32_t v){m.put32(0x692c98u,v);}
-    // 404020 / 404030.
-    std::uint32_t current()const{return s.current_7398d4;}
-    void select_404030(std::uint32_t k){if(k!=count()-1u)s.current_7398d4=k;}
-    // Owner methods called through their vtables ([obj]+n).
-    std::uint32_t vcall_owner(std::uint32_t obj,std::uint32_t slot,std::initializer_list<std::uint32_t> args){return call(m.u32(m.u32(obj)+slot),obj,args);}
-    // 48CAE0 / 48CAD0 (window +1284 / +1280 plus 38 / 17), x87.
-    driving::X87 window_y_48cae0(){return driving::X87(m.f32(Window+0x1284))+driving::X87(38.0f);}
-    driving::X87 window_x_48cad0(){return driving::X87(m.f32(Window+0x1280))+driving::X87(17.0f);}
-    std::int32_t window_height_48ca90(){return std::int32_t(std::int16_t(m.u16(Window+0x36)))-0x25;}
-    // 48CA40(window, format, ...): _vsnprintf into 0x400 bytes, then 48EE80(window +4D4).
-    void message_48ca40(std::uint32_t format,std::initializer_list<std::uint32_t> args){
-        auto it=args.begin();
-        const auto text=guest_format(m,format,[&]{return it!=args.end()?*it++:0u;});
-        const std::size_t n=std::min<std::size_t>(text.size(),0x400);
-        for(std::size_t k=0;k<n;++k)m.put8(Message+std::uint32_t(k),std::uint8_t(text[k]));
-        if(n<0x400)m.put8(Message+std::uint32_t(n),0);
-        (void)call(0x48ee80u,0,{Window+0x4d4u,Message});
-    }
-    void sprintf_84b100(std::uint32_t format,std::initializer_list<std::uint32_t> args){
-        std::vector<std::uint32_t> list{Text84b100,format};list.insert(list.end(),args.begin(),args.end());
-        PcRaceCall k{};k.pc=0x5802ddu;k.argc=std::uint32_t(list.size());for(std::size_t n=0;n<list.size();++n)k.args[n]=list[n];(void)svc(k);
-    }
-    // ---- the device methods the screen calls (vtable slots of 624B30 / 624B88) ----
-    std::uint32_t& slot_word(std::uint32_t d,std::uint32_t a){return *reinterpret_cast<std::uint32_t*>(m.at(d+a,4,true));}
-    static std::int32_t button_slot(std::uint32_t field){             // 4024C0 / 402550 / 4033B0 / 403A60 tables
-        static constexpr std::int32_t Slots[9]{7,6,0,1,10,11,2,3,12};
-        return field<9u?Slots[field]:16;
-    }
-    std::uint32_t map_base(std::uint32_t d)const{return keyboard(d)?0x3d0u:0x70u;}
-    std::uint32_t source_1c(std::uint32_t d,std::uint32_t field){   // +1C: 4024C0 / 403C70
-        const auto k=button_slot(field);return k<16?m.u32(d+map_base(d)+std::uint32_t(k)*4u):0x10u;}
-    std::uint32_t set_source_20(std::uint32_t d,std::uint32_t field,std::uint32_t v){   // +20: 402550 / 403D10
-        if(field>8u)return 0u;m.put32(d+map_base(d)+std::uint32_t(button_slot(field))*4u,v);return 1u;}
-    std::uint32_t set_axis_24(std::uint32_t d,std::uint32_t k,std::uint32_t v){         // +24: 402610
-        if(std::int32_t(v)<0||std::int32_t(v)>8)return 0u;m.put32(d+0x54+k*4u,v);return 1u;}
-    void listen_begin_28(std::uint32_t d){                                               // +28: 403080 / 403A30
-        if(keyboard(d)){for(std::uint32_t k=0;k<0x100;++k)m.put8(d+0x2d0+k,m.u8(d+0x1d0+k));return;}
-        for(std::uint32_t k=0;k<0x14;++k){m.put32(d+0x1d4+k*4,0);m.put32(d+0x224+k*4,0);m.put32(d+0x274+k*4,0);}
-        m.put8(d+0x1d0,1);
-    }
-    std::uint32_t axis_moved_38(std::uint32_t d){                                        // +38: 4034A0 / 563550
-        if(keyboard(d))return 8u;
-        std::int32_t best=std::int32_t(0xffff0001u),index=-1;
-        for(std::int32_t k=0;k<8;++k){
-            std::int32_t v=std::int32_t(m.u32(d+0x274+std::uint32_t(k)*4u));v=v<0?-v:v;
-            if(double(v)<12287.625)continue;                                                // 6280D8
-            if(v>=best){best=v;index=k;}
-        }
-        return best<0||index==-1?8u:std::uint32_t(index);
-    }
-    std::uint32_t listen_2c(std::uint32_t d,std::uint32_t field){                       // +2C: 4030C0 / 403A50
-        if(keyboard(d))return 0u;
-        if(m.u8(d+0x1d0)){for(std::uint32_t k=0;k<0x14;++k)m.put32(d+0x1d4+k*4,m.u32(d+0x224+k*4));m.put8(d+0x1d0,0);}
-        for(std::uint32_t k=0;k<8;++k){
-            std::int32_t v=std::int32_t(m.u32(d+0x1d4+k*4))-std::int32_t(m.u32(d+0x224+k*4));v=v<0?-v:v;
-            if(v>std::int32_t(m.u32(d+0x274+k*4)))m.put32(d+0x274+k*4,std::uint32_t(v));
-        }
-        for(std::uint32_t k=0;k<32;++k){
-            const std::int32_t now=m.u8(d+0x2a4+k),then=m.u8(d+0x254+k);
-            std::int32_t v=now-then;v=v<0?-v:v;
-            if(v>now)m.put8(d+0x2a4+k,std::uint8_t(v));
-        }
-        std::uint32_t axis=field;
-        if(field==8u){axis=axis_moved_38(d);}
-        else if(field>7u)return 0u;
-        return axis<8u?m.u32(d+0x224+axis*4u):0u;
-    }
-    void apply_axis_30(std::uint32_t d,std::uint32_t field){                           // +30: 403350 / 491E50
-        if(keyboard(d))return;
-        const std::uint32_t a=axis_moved_38(d);
-        if(std::int32_t(a)<0||a==8u)return;
-        for(std::uint32_t k=0;k<7;++k)if(m.u32(d+0x54+k*4)==a){m.put32(d+0x54+k*4,m.u32(d+0x54+field*4));break;}   // the field's old axis
-        if(std::int32_t(field)>=0&&std::int32_t(field)<7)m.put32(d+0x54+field*4,a);
-    }
-    // 402450 / 403BD0 (ECX slot, ESI source): the source moves to the slot; a slot that held it gets the slot's old one.
-    void move_source(std::uint32_t d,std::int32_t slot,std::uint32_t source){
-        if(slot<0||slot>=16)return;
-        const std::uint32_t base=d+map_base(d);
-        for(std::uint32_t k=0;k<16;++k)if(m.u32(base+k*4)==source)m.put32(base+k*4,m.u32(base+std::uint32_t(slot)*4u));
-        m.put32(base+std::uint32_t(slot)*4u,source);
-    }
-    std::int32_t pressed_3c(std::uint32_t d){                                            // +3C: 403560 / 403C30
-        if(keyboard(d)){
-            for(std::uint32_t k=0;k<0x100;++k){const auto now=m.u8(d+0x1d0+k);if(now!=m.u8(d+0x2d0+k)&&(now&0x80u))return std::int32_t(k);}
-            return -1;}
-        for(std::uint32_t k=0;k<32;++k)if(m.u8(d+0x2a4+k)>0x1eu)return std::int32_t(k);
-        return -1;
-    }
-    // 445E30 / 445DA0: the key name made wide and the characters the font lacks replaced.
-    void key_name_wide(std::uint16_t* w,const std::uint8_t* narrow,unsigned limit){
-        for(unsigned k=0;k<limit&&narrow[k];++k)w[k]=std::uint16_t(std::int16_t(std::int8_t(narrow[k])));
-        for(std::uint16_t* p=w;*p;++p){
-            const std::uint16_t ch=*p;
-            if(ch>=0x20&&ch<=0x7b)continue;
-            std::uint32_t k=0;for(;k<0x3d;++k)if(m.u16(0x59dc08u+k*2)==ch)break;
-            if(k==0x3d){*p=0xd1;continue;}
-            for(std::uint32_t j=0;j<0x40;++j)if(m.u16(0x59db08u+j*4)==ch){*p=m.u16(0x59db0au+j*4);break;}
-        }
-    }
-    // ToAscii (fake): digits, letters (lower case) and space.
-    static unsigned to_ascii(std::uint32_t vk,std::uint8_t* out){
-        const bool printable=(vk>='0'&&vk<='9')||(vk>='A'&&vk<='Z')||vk==0x20;
-        if(printable){const std::uint16_t v=std::uint16_t(vk>='A'&&vk<='Z'?vk+0x20:vk);std::memcpy(out,&v,2);}
-        return printable?1u:0u;
-    }
-    void bind_34(std::uint32_t d,std::uint32_t field){                                  // +34: 4033B0 / 403A60
-        if(!keyboard(d)){
-            for(std::uint32_t k=0;k<32;++k)if(m.u8(d+0x2a4+k)>0x1eu){move_source(d,button_slot(field),k);return;}
-            return;}
-        std::int32_t key=-1;
-        for(std::uint32_t k=0;k<0x100;++k){const auto now=m.u8(d+0x1d0+k);if(now!=m.u8(d+0x2d0+k)&&(now&0x80u)){key=std::int32_t(k);break;}}
-        const std::uint32_t vk=scan_to_vk(std::uint32_t(key));                          // MapVirtualKeyExA(key, 3, GetKeyboardLayout(0))
-        if(vk){
-            std::uint8_t out[0x100]{};(void)to_ascii(vk,out);
-            std::uint16_t wide[0x100]{};key_name_wide(wide,out,3);
-            if(wide[0]==0xd1)return;                                                      // a character the font lacks
-        }
-        move_source(d,button_slot(field),std::uint32_t(key));
-    }
-    // ---- screen helpers ----
-    // 4D6700: the axis field of rows 1..16.
-    static std::uint32_t axis_field_4d6700(std::uint32_t row){
-        static constexpr std::int32_t Fields[16]{0,1,2,3,5,4,4,5,0,1,2,3,8,6,7,-1};
-        return row-1u<16u?std::uint32_t(Fields[row-1u]):0xffffffffu;
-    }
-    // 4D6790: the name text of an axis field.
-    std::uint32_t axis_name_4d6790(std::uint32_t field){
-        static constexpr std::uint32_t Ids[9]{0x498,0x499,0x49a,0x49b,0x49c,0x49d,0x49e,0x49f,0x496};
-        return field<9u?text(Ids[field]):0u;
-    }
-    // 4D7080: rows 1..6 and 13 (axes) for the pads, 7 and 8 (two more keys) for the keyboard.
-    void rows_4d7080(){
-        const bool kb=u(0x1d6c)==count()-1u;
-        const std::uint32_t on=0x4ed360u,off=0x4ed390u;
-        for(std::uint32_t r=1;r<=6;++r)(void)call(kb?on:off,List,{r});
-        (void)call(kb?off:on,List,{7});(void)call(kb?off:on,List,{8});
-        (void)call(kb?on:off,List,{0xd});
-    }
-    // 4D6EA0: the help line of the selected row.
-    void help_4d6ea0(){
-        const std::uint32_t r=u(0x1c6c)-1u;
-        std::uint32_t id=0x4a1;
-        if(r<16u){
-            static constexpr std::uint8_t Kind[16]{0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,2};
-            const auto kind=Kind[r];
-            if(kind==0){
-                if(i(0x1d70)!=-1&&i(0x1d68)==1){
-                    const auto name=axis_name_4d6790(axis_moved_38(dev(u(0x1d70))));
-                    message_48ca40(text(0x4a5),{name});return;}
-                const std::int32_t st=i(0x1d68);
-                if(st<=1)id=0x4a2;
-                else{
-                    const std::uint32_t f=u(0x1d78);
-                    switch(f){
-                    case 0:id=0x4a7+(st!=2);break;case 1:id=0x4a9+(st!=2);break;case 2:id=0x4ab+(st==2);break;
-                    case 3:id=0x4ad+(st!=2);break;case 4:id=0x4b1+(st!=2);break;case 5:id=0x4af+(st==2);break;
-                    default:id=0x4a7;break;}
-                }
-            }else if(kind==1)id=i(0x1d70)!=-1?0x4a6u:0x4a3u;
-            else id=0x4a4;
-        }
-        message_48ca40(text(id),{});
-    }
-    // 4D7010(field, axis): wait for the input of a row.
-    void listen_4d7010(std::uint32_t field,std::uint32_t axis){
-        m.put8(O+0x1d80,std::uint8_t(axis));put(0x1d70,u(0x1d6c));put(0x1d74,current());put(0x1d78,field);
-        set_timer(0x25a);listen_begin_28(dev(u(0x1d6c)));
-        select_404030(0xffffffffu);
-        m.put8(O+0x1c7f,1);put(0x1d68,1);
-    }
-    // 404050(device): the default assignments.
-    void defaults_404050(std::uint32_t k){
-        if(k==count()-1u){const std::uint32_t d=dev(k);for(std::uint32_t j=0;j<16;++j)m.put32(d+0x3d0+j*4,m.u32(0x61e6b8u+j*4));return;}
-        if(std::int32_t(k)<0||k>=count()-1u)return;
-        static constexpr std::uint32_t Axes[7]{8,8,2,0,4,1,3};
-        const std::uint32_t d=dev(k);
-        for(std::uint32_t j=0;j<16;++j)m.put32(d+0x70+j*4,j);
-        for(std::uint32_t j=0;j<7;++j)m.put32(d+0x54+j*4,Axes[j]);
-    }
-    // ---- 4D7E00 ----
-    std::uint32_t init_4d7e00(){
-        put(0x1d6c,current());put(0x1d70,0xffffffffu);put(0x1d74,current());put(0x1d7c,7);put(0x1d68,0);put(0x1d88,0);put(0x1d8c,0);
-        set_timer(0);
-        if(i(0x1d6c)<0&&count()!=0)put(0x1d6c,count()-1u);
-        const std::uint32_t mark=(OwnerBase&~0xffu)|(i(0x1d6c)>=0?3u:2u);           // a byte over the pushed ECX
-        const std::uint32_t title=text(0x4a1);
-        (void)call(0x48d0c0u,Window,{0x6255d5u,title,mark,fbits(float(std::int32_t(g(0x692c40u)))),fbits(float(std::int32_t(g(0x692c2cu)))),
-            fbits(float(std::int32_t(g(0x692c3cu)))),fbits(float(std::int32_t(g(0x692c30u)))),g(0x692b28u),0u});
-        (void)call(0x48ee80u,0,{Window+0xdec,text(0x295)});                             // 48CBC0
-        (void)call(0x48ee80u,0,{Window+0x960,text(0x296)});                             // 48CBE0
-        (void)call(0x4ecfb0u,List,{0u,fbits(float(window_height_48ca90())),1u,0u,0u});
-        const float y=driving::x87_float(window_y_48cae0()+driving::X87(44.0f));       // 5B0270
-        const float x=driving::x87_float(window_x_48cad0());
-        (void)call(0x4ed8a0u,List,{fbits(x),fbits(y)});
-        (void)call(0x4ed880u,List,{0x41880000u});
-        (void)call(0x4ed8c0u,List,{g(0x692b2cu)});
-        for(std::uint32_t k=0;k<g(0x692c94u);++k)(void)call(0x4ed160u,List,{text(g(0x692c50u+k*4)),0u});
-        rows_4d7080();
-        put(0x9ac,u(0x9ac)+1u);
-        return 1u;
-    }
-    // ---- 4D6E50 ----
-    std::uint32_t close_4d6e50(){
-        if(i(0x1d70)!=-1){put(0x1d6c,u(0x1d70));select_404030(u(0x1d78));}
-        put(0x1d70,0xffffffffu);
-        (void)call(0x4eda60u,List,{});
-        const std::uint32_t r=vcall_owner(Window,0x10,{});
-        m.put8(O+0x9b8,1);
-        return r;                                                                        // EAX of the window call
-    }
-    // 4D6900(field, device): the name of the key / button of a field (84B100).
-    std::uint32_t source_name_4d6900(std::uint32_t field,std::uint32_t d){
-        m.put8(Text84b100,0);
-        if(u(0x1d6c)!=count()-1u){
-            const std::uint32_t idx=source_1c(d,field);
-            sprintf_84b100(text(0x4a0),{idx+1u});return Text84b100;}
-        const std::uint32_t key=source_1c(d,field);
-        const std::uint32_t vk=scan_to_vk(key);
-        if(!vk){                                                                         // 4D6860: by scan code
-            for(std::uint32_t e=0x5cc200u,k=0;e<0x5cc8c0u;e+=12,++k)if(m.u32(e)==key){sprintf_84b100(text(m.u32(0x5cc208u+k*12)),{});break;}
-            return Text84b100;}
-        for(std::uint32_t e=0x5cc204u,k=0;e<0x5cc8c4u;e+=12,++k)                        // 4D68B0: by virtual key
-            if(m.u32(e)==vk){sprintf_84b100(text(m.u32(0x5cc208u+k*12)),{});break;}
-        if(m.u8(Text84b100))return Text84b100;
-        std::uint8_t out[0x100]{};(void)to_ascii(vk,out);
-        sprintf_84b100(0x626460u,{std::uint32_t(std::int32_t(std::int8_t(out[0])))});  // "%c"
-        std::uint16_t wide[0x100]{};std::uint8_t narrow[4];for(unsigned k=0;k<4;++k)narrow[k]=m.u8(Text84b100+k);
-        std::uint8_t zero_ended[5]{narrow[0],narrow[1],narrow[2],narrow[3],0};
-        key_name_wide(wide,zero_ended,4);
-        for(unsigned k=0;wide[k];++k)m.put8(Text84b100+k,std::uint8_t(wide[k]));            // 445E10 (no terminator)
-        return Text84b100;
-    }
-    // 445D40(device, devices, x, y, height, scale): the arrows of the device row (42D280).
-    void arrows_445d40(std::int32_t k,std::int32_t n,std::int32_t x,std::int32_t y,std::int32_t height,std::uint32_t scale){
-        if(k>0)(void)call(0x42d280u,0,{0x3004au,std::uint32_t(x-0xc),std::uint32_t(y+3),0u,scale,0xffffffffu});
-        if(k<n-1)(void)call(0x42d280u,0,{0x3004au,std::uint32_t(x+height-0xc),std::uint32_t(y+3),1u,scale,0xffffffffu});
-    }
-    // ---- 4D6A60 ----
-    std::uint32_t display_4d6a60(){
-        (void)call(0x4ed3e0u,List,{});
-        bool none=i(0x1d6c)==-1;
-        std::uint32_t d=0;std::array<std::uint8_t,0x244> info{};
-        if(!none){d=dev(u(0x1d6c));device_instance(info.data(),keyboard(d));}          // GetDeviceInfo (fake: always succeeds)
-        std::int32_t drawn=0;
-        for(std::uint32_t row=0;row<0x11;++row){
-            std::uint32_t label=0;
-            (void)call(0x42ca60u,0,{9});(void)call(0x42ccb0u,0,{g(0x692b30u)});(void)call(0x42cca0u,0,{0xff3f474au});
-            const float step=float(drawn)*17.0f;
-            auto row_y=[&]{return std::int32_t(float(driving::x87_ftol32(window_y_48cae0())+0x2c)+step);};
-            const std::int32_t x=std::int32_t(m.f32(0x692becu));
-            (void)call(0x42cc00u,0,{std::uint32_t(x),std::uint32_t(row_y())});
-            const bool kb=u(0x1d6c)==count()-1u;
-            if(none)label=text(row==0?0x497u:0x496u);
-            else switch(row){
-            case 0:{
-                m.put8(Text84b100,0);
-                std::uint32_t name=Name;
-                for(unsigned k=0;k<0x104;++k)m.put8(Name+k,info[0x12c+k]);
-                if(current()==u(0x1d6c)){sprintf_84b100(0x5ccbe0u,{Name});name=Text84b100;}
-                const std::int32_t half=window_height_48ca90()/2;
-                arrows_445d40(i(0x1d6c),std::int32_t(count()),x,row_y(),half,fbits(float(std::int32_t(g(0x692b30u)))));
-                label=name;break;}
-            case 1:case 2:case 3:case 4:case 5:case 6:{
-                static constexpr std::uint32_t Fields[7]{0,0,1,2,3,5,4};
-                if(kb)break;
-                const std::uint32_t k=Fields[row];
-                label=axis_name_4d6790(k<7u?m.u32(d+0x54+k*4):8u);break;}
-            case 7:if(kb)label=source_name_4d6900(4,d);break;
-            case 8:if(kb)label=source_name_4d6900(5,d);break;
-            case 9:label=source_name_4d6900(0,d);break;
-            case 10:label=source_name_4d6900(1,d);break;
-            case 11:label=source_name_4d6900(2,d);break;
-            case 12:label=source_name_4d6900(3,d);break;
-            case 13:if(!kb)label=source_name_4d6900(8,d);break;
-            case 14:label=source_name_4d6900(6,d);break;
-            case 15:label=source_name_4d6900(7,d);break;
-            default:break;
-            }
-            if(i(0x1d68)>1&&u(0x1c6c)==row){
-                const std::int32_t v=i(0x1d84)+0x7fff;
-                std::int32_t q=std::int32_t((std::int64_t(v)*std::int64_t(std::int32_t(0xa003c017u)))>>32)+v;q>>=12;q+=std::int32_t(std::uint32_t(q)>>31);
-                m.put32(Prompt+0xac,std::uint32_t(q));                                      // 446430
-                (void)call(0x4469c0u,Prompt,{});
-                ++drawn;
-            }else if(label){
-                const std::int32_t half=window_height_48ca90()/2;
-                const std::int32_t at=driving::x87_ftol32(driving::X87(half)*driving::X87(0.8));   // 5CCBD8
-                (void)call(0x42ce70u,0,{std::uint32_t(at),0x626468u,label});
-                ++drawn;
-            }
-        }
-        return 0x11;                                                                     // EAX: the row counter
-    }
-    // ---- 4D7FB0 ----
-    std::uint32_t control_4d7fb0(){
-        std::uint32_t choice=0xc;
-        const std::int32_t row=i(0x1c6c);
-        if(std::int32_t(timer())>0)set_timer(timer()-1u);
-        else{
-            choice=vcall_owner(O,0x14,{1});
-            if(i(0x1d6c)!=-1){
-                const std::uint32_t kbd=dev(count()-1u);                              // 4037E0(0x0E): backspace on the keyboard
-                if(m.u8(kbd+4)&&(m.u8(kbd+0x1d0+0xe)>>7)){
-                    if(row>0&&row<=6){(void)set_axis_24(dev(u(0x1d6c)),axis_field_4d6700(std::uint32_t(row)),8);return 0;}
-                    if(row>6){(void)set_source_20(dev(u(0x1d6c)),axis_field_4d6700(std::uint32_t(row)),0xffffffffu);return 0;}
-                    return 0;
-                }
-            }
-        }
-        const std::int32_t editing=i(0x1d70),state=i(0x1d68);
-        if(editing!=-1&&state==1){
-            const std::uint32_t d=dev(std::uint32_t(editing));
-            bool go=pressed_3c(d)!=-1;
-            if(go)set_timer(0);
-            else if(std::int32_t(timer())<=0)go=true;
-            else{
-                (void)InputFrame(c,s).update(d);                                            // +10 (4023E0)
-                if(driving::X87(541.799988f)>driving::X87(std::int32_t(timer()))){(void)listen_2c(d,8);}   // 5CCBF8
-                help_4d6ea0();return 0;
-            }
-            if(!m.u8(O+0x1d80)){                                                            // a button / key
-                bind_34(d,u(0x1d78));select_404030(u(0x1d74));
-                put(0x1d70,0xffffffffu);m.put8(O+0x1c7f,0);put(0x1d68,0);set_timer(0x3c);
-                help_4d6ea0();return 0;
-            }
-            put(0x1d7c,axis_moved_38(d));apply_axis_30(d,u(0x1d78));
-            const std::int32_t list_row=i(0x1c6c);
-            const std::int32_t top=driving::x87_ftol32(window_y_48cae0());
-            const float py=float(std::int32_t(top+std::int32_t(g(0x692ca0u))+0x2c))+float(list_row)*17.0f-240.0f;   // 628074, 6281CC
-            (void)call(0x446340u,Prompt,{0x5cc048u,0u,10u,g(0x692bbcu),fbits(py),g(0x692b30u)});
-            put(0x1d68,2);set_timer(0x25a);listen_begin_28(d);
-            help_4d6ea0();return 0;
-        }
-        if(state>1){
-            const std::uint32_t d=dev(u(0x1d70));
-            put(0x1d84,0);
-            (void)InputFrame(c,s).update(d);
-            if(driving::X87(541.799988f)>driving::X87(std::int32_t(timer()))){
-                put(0x1d84,listen_2c(d,u(0x1d7c)));
-                if(pressed_3c(d)!=-1&&choice==0xc){set_timer(0x25a);listen_begin_28(d);choice=0;}
-            }
-            help_4d6ea0();
-        }
-        switch(choice){
-        case 0:{
-            if(i(0x1d6c)!=-1&&i(0x1d68)==0){
-                if(std::uint32_t(row)>16u)return 0;
-                static constexpr std::int32_t Field[17]{-1,0,1,2,3,5,4,4,5,0,1,2,3,8,6,7,-2};
-                static constexpr std::uint8_t Axis[17]{0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0};
-                if(row==0){select_404030(u(0x1d6c));return 0;}
-                if(row==16){if(i(0x1d6c)>=0)defaults_404050(u(0x1d6c));return 0;}
-                listen_4d7010(std::uint32_t(Field[row]),Axis[row]);return 0;
-            }
-            const std::int32_t st=i(0x1d68);
-            if(st<=1)return 0;
-            if(st==2){put(0x1d88,u(0x1d84));put(0x1d8c,0);put(0x1d68,3);return 0;}
-            set_timer(0x3c);
-            put(0x1d8c,u(0x1d84));
-            {const std::uint32_t d=dev(u(0x1d70)),e=u(0x1d7c);
-             if(!keyboard(d)){m.put32(d+0x170+e*8,u(0x1d88));m.put32(d+0x174+e*8,u(0x1d84));}}   // +18 (403590 / 403C60)
-            (void)call(0x465250u,Prompt+4,{});                                            // 4C5440
-            put(0x1d84,0);put(0x1d68,0);select_404030(u(0x1d74));put(0x1d70,0xffffffffu);m.put8(O+0x1c7f,0);
-            help_4d6ea0();return 0;}
-        case 1:{
-            std::uint32_t done=1;
-            for(std::uint32_t k=0;k<count();++k){
-                const std::uint32_t d=dev(k),rec=DevicesBase+k*0xb0u;
-                for(std::uint32_t j=0;j<16;++j)m.put8(rec+4+j,m.u8(d+0x3c+j));                // 4D5B40
-                for(std::uint32_t j=0;j<7;++j)m.put32(rec+0x14+j*4,m.u32(d+0x54+j*4));
-                for(std::uint32_t j=0;j<16;++j)m.put32(rec+0x30+j*4,m.u32(d+map_base(d)+j*4));
-                for(std::uint32_t j=0;j<16;++j)m.put32(rec+0x70+j*4,m.u32(d+0x170+j*4));
-                m.put8(rec,1);
-            }
-            m.put8(0x7c27d4u,std::uint8_t(m.u8(0x7c27d4u)|2u));
-            put(0x9ac,u(0x9ac)+1u);put(0x9b4,6);put(0x9b0,done);
-            return 0;}
-        case 2:if(i(0x1d68)<1){(void)call(0x4ed250u,List,{});help_4d6ea0();}return 0;
-        case 4:if(i(0x1d68)<1){(void)call(0x4ed2a0u,List,{});help_4d6ea0();}return 0;
-        case 3:case 5:{
-            if(row!=0||i(0x1d68)>=1)return 0;
-            std::int32_t k=i(0x1d6c);
-            if(choice==3){if(k<=0)return 0;--k;}
-            else{if(k>=std::int32_t(count())-1)return 0;++k;}
-            put(0x1d6c,std::uint32_t(k));rows_4d7080();(void)call(0x4249f0u,0,{1});
-            return 0;}
-        }
-        return 0;
-    }
-};
-}
+// ---- Options > Controls > Configuration (4D7E00 init, 4D7FB0 control, 4D6A60 display,
+
+// 4D6E50 close), native over the title owner (OwnerBase) and the device objects. The
+
+// owner's own methods and the text services go through the service of run().
+
+namespace {
+
+constexpr std::uint32_t ConfigText=0x0f4a0000u,ConfigTextSize=0x800u;   // the PC formats these on its stack
+
+struct ConfigScreen {
+
+    NativeRuntimeContext& c;State& s;PcRaceMemory& m;const PcRaceService& svc;
+
+    static constexpr std::uint32_t O=OwnerBase,Window=OwnerBase+0x9bc,List=OwnerBase+0x1c6c,Prompt=OwnerBase+0x1ca8;
+
+    static constexpr std::uint32_t Name=ConfigText,Message=ConfigText+0x400u;   // device name, 48CA40 text
+
+    static constexpr std::uint32_t Text84b100=0x84b100u;
+
+    ConfigScreen(NativeRuntimeContext& cc,State& ss,const PcRaceService& service):c(cc),s(ss),m(ss.memory),svc(service){}
+
+    std::uint32_t call(std::uint32_t pc,std::uint32_t ecx,std::initializer_list<std::uint32_t> args){
+
+        PcRaceCall k{};k.pc=pc;k.ecx=ecx;k.argc=std::uint32_t(args.size());unsigned i=0;for(auto a:args)k.args[i++]=a;return svc(k);}
+
+    static std::uint32_t fbits(float f){std::uint32_t u;std::memcpy(&u,&f,4);return u;}
+
+    std::uint32_t text(std::uint32_t id){return call(0x465eb0u,0,{id});}
+
+    std::uint32_t u(std::uint32_t o)const{return m.u32(O+o);}
+
+    std::int32_t i(std::uint32_t o)const{return std::int32_t(m.u32(O+o));}
+
+    void put(std::uint32_t o,std::uint32_t v){m.put32(O+o,v);}
+
+    std::uint32_t g(std::uint32_t a)const{return m.u32(a);}
+
+    std::uint32_t count()const{return s.count_95aec4;}
+
+    std::uint32_t dev(std::uint32_t k)const{return m.u32(0x8606d4u+k*4u);}
+
+    bool keyboard(std::uint32_t d)const{return m.u32(d)==KeyboardVtable;}
+
+    std::uint32_t timer()const{return m.u32(0x692c98u);}
+
+    void set_timer(std::uint32_t v){m.put32(0x692c98u,v);}
+
+    // 404020 / 404030.
+
+    std::uint32_t current()const{return s.current_7398d4;}
+
+    void select_404030(std::uint32_t k){if(k!=count()-1u)s.current_7398d4=k;}
+
+    // Owner methods called through their vtables ([obj]+n).
+
+    std::uint32_t vcall_owner(std::uint32_t obj,std::uint32_t slot,std::initializer_list<std::uint32_t> args){return call(m.u32(m.u32(obj)+slot),obj,args);}
+
+    // 48CAE0 / 48CAD0 (window +1284 / +1280 plus 38 / 17), x87.
+
+    driving::X87 window_y_48cae0(){return driving::X87(m.f32(Window+0x1284))+driving::X87(38.0f);}
+
+    driving::X87 window_x_48cad0(){return driving::X87(m.f32(Window+0x1280))+driving::X87(17.0f);}
+
+    std::int32_t window_height_48ca90(){return std::int32_t(std::int16_t(m.u16(Window+0x36)))-0x25;}
+
+    // 48CA40(window, format, ...): _vsnprintf into 0x400 bytes, then 48EE80(window +4D4).
+
+    void message_48ca40(std::uint32_t format,std::initializer_list<std::uint32_t> args){
+
+        auto it=args.begin();
+
+        const auto text=guest_format(m,format,[&]{return it!=args.end()?*it++:0u;});
+
+        const std::size_t n=std::min<std::size_t>(text.size(),0x400);
+
+        for(std::size_t k=0;k<n;++k)m.put8(Message+std::uint32_t(k),std::uint8_t(text[k]));
+
+        if(n<0x400)m.put8(Message+std::uint32_t(n),0);
+
+        (void)call(0x48ee80u,0,{Window+0x4d4u,Message});
+
+    }
+
+    void sprintf_84b100(std::uint32_t format,std::initializer_list<std::uint32_t> args){
+
+        std::vector<std::uint32_t> list{Text84b100,format};list.insert(list.end(),args.begin(),args.end());
+
+        PcRaceCall k{};k.pc=0x5802ddu;k.argc=std::uint32_t(list.size());for(std::size_t n=0;n<list.size();++n)k.args[n]=list[n];(void)svc(k);
+
+    }
+
+    // ---- the device methods the screen calls (vtable slots of 624B30 / 624B88) ----
+
+    std::uint32_t& slot_word(std::uint32_t d,std::uint32_t a){return *reinterpret_cast<std::uint32_t*>(m.at(d+a,4,true));}
+
+    static std::int32_t button_slot(std::uint32_t field){             // 4024C0 / 402550 / 4033B0 / 403A60 tables
+
+        static constexpr std::int32_t Slots[9]{7,6,0,1,10,11,2,3,12};
+
+        return field<9u?Slots[field]:16;
+
+    }
+
+    std::uint32_t map_base(std::uint32_t d)const{return keyboard(d)?0x3d0u:0x70u;}
+
+    std::uint32_t source_1c(std::uint32_t d,std::uint32_t field){   // +1C: 4024C0 / 403C70
+
+        const auto k=button_slot(field);return k<16?m.u32(d+map_base(d)+std::uint32_t(k)*4u):0x10u;}
+
+    std::uint32_t set_source_20(std::uint32_t d,std::uint32_t field,std::uint32_t v){   // +20: 402550 / 403D10
+
+        if(field>8u)return 0u;m.put32(d+map_base(d)+std::uint32_t(button_slot(field))*4u,v);return 1u;}
+
+    std::uint32_t set_axis_24(std::uint32_t d,std::uint32_t k,std::uint32_t v){         // +24: 402610
+
+        if(std::int32_t(v)<0||std::int32_t(v)>8)return 0u;m.put32(d+0x54+k*4u,v);return 1u;}
+
+    void listen_begin_28(std::uint32_t d){                                               // +28: 403080 / 403A30
+
+        if(keyboard(d)){for(std::uint32_t k=0;k<0x100;++k)m.put8(d+0x2d0+k,m.u8(d+0x1d0+k));return;}
+
+        for(std::uint32_t k=0;k<0x14;++k){m.put32(d+0x1d4+k*4,0);m.put32(d+0x224+k*4,0);m.put32(d+0x274+k*4,0);}
+
+        m.put8(d+0x1d0,1);
+
+    }
+
+    std::uint32_t axis_moved_38(std::uint32_t d){                                        // +38: 4034A0 / 563550
+
+        if(keyboard(d))return 8u;
+
+        std::int32_t best=std::int32_t(0xffff0001u),index=-1;
+
+        for(std::int32_t k=0;k<8;++k){
+
+            std::int32_t v=std::int32_t(m.u32(d+0x274+std::uint32_t(k)*4u));v=v<0?-v:v;
+
+            if(double(v)<12287.625)continue;                                                // 6280D8
+
+            if(v>=best){best=v;index=k;}
+
+        }
+
+        return best<0||index==-1?8u:std::uint32_t(index);
+
+    }
+
+    std::uint32_t listen_2c(std::uint32_t d,std::uint32_t field){                       // +2C: 4030C0 / 403A50
+
+        if(keyboard(d))return 0u;
+
+        if(m.u8(d+0x1d0)){for(std::uint32_t k=0;k<0x14;++k)m.put32(d+0x1d4+k*4,m.u32(d+0x224+k*4));m.put8(d+0x1d0,0);}
+
+        for(std::uint32_t k=0;k<8;++k){
+
+            std::int32_t v=std::int32_t(m.u32(d+0x1d4+k*4))-std::int32_t(m.u32(d+0x224+k*4));v=v<0?-v:v;
+
+            if(v>std::int32_t(m.u32(d+0x274+k*4)))m.put32(d+0x274+k*4,std::uint32_t(v));
+
+        }
+
+        for(std::uint32_t k=0;k<32;++k){
+
+            const std::int32_t now=m.u8(d+0x2a4+k),then=m.u8(d+0x254+k);
+
+            std::int32_t v=now-then;v=v<0?-v:v;
+
+            if(v>now)m.put8(d+0x2a4+k,std::uint8_t(v));
+
+        }
+
+        std::uint32_t axis=field;
+
+        if(field==8u){axis=axis_moved_38(d);}
+
+        else if(field>7u)return 0u;
+
+        return axis<8u?m.u32(d+0x224+axis*4u):0u;
+
+    }
+
+    void apply_axis_30(std::uint32_t d,std::uint32_t field){                           // +30: 403350 / 491E50
+
+        if(keyboard(d))return;
+
+        const std::uint32_t a=axis_moved_38(d);
+
+        if(std::int32_t(a)<0||a==8u)return;
+
+        for(std::uint32_t k=0;k<7;++k)if(m.u32(d+0x54+k*4)==a){m.put32(d+0x54+k*4,m.u32(d+0x54+field*4));break;}   // the field's old axis
+
+        if(std::int32_t(field)>=0&&std::int32_t(field)<7)m.put32(d+0x54+field*4,a);
+
+    }
+
+    // 402450 / 403BD0 (ECX slot, ESI source): the source moves to the slot; a slot that held it gets the slot's old one.
+
+    void move_source(std::uint32_t d,std::int32_t slot,std::uint32_t source){
+
+        if(slot<0||slot>=16)return;
+
+        const std::uint32_t base=d+map_base(d);
+
+        for(std::uint32_t k=0;k<16;++k)if(m.u32(base+k*4)==source)m.put32(base+k*4,m.u32(base+std::uint32_t(slot)*4u));
+
+        m.put32(base+std::uint32_t(slot)*4u,source);
+
+    }
+
+    std::int32_t pressed_3c(std::uint32_t d){                                            // +3C: 403560 / 403C30
+
+        if(keyboard(d)){
+
+            for(std::uint32_t k=0;k<0x100;++k){const auto now=m.u8(d+0x1d0+k);if(now!=m.u8(d+0x2d0+k)&&(now&0x80u))return std::int32_t(k);}
+
+            return -1;}
+
+        for(std::uint32_t k=0;k<32;++k)if(m.u8(d+0x2a4+k)>0x1eu)return std::int32_t(k);
+
+        return -1;
+
+    }
+
+    // 445E30 / 445DA0: the key name made wide and the characters the font lacks replaced.
+
+    void key_name_wide(std::uint16_t* w,const std::uint8_t* narrow,unsigned limit){
+
+        for(unsigned k=0;k<limit&&narrow[k];++k)w[k]=std::uint16_t(std::int16_t(std::int8_t(narrow[k])));
+
+        for(std::uint16_t* p=w;*p;++p){
+
+            const std::uint16_t ch=*p;
+
+            if(ch>=0x20&&ch<=0x7b)continue;
+
+            std::uint32_t k=0;for(;k<0x3d;++k)if(m.u16(0x59dc08u+k*2)==ch)break;
+
+            if(k==0x3d){*p=0xd1;continue;}
+
+            for(std::uint32_t j=0;j<0x40;++j)if(m.u16(0x59db08u+j*4)==ch){*p=m.u16(0x59db0au+j*4);break;}
+
+        }
+
+    }
+
+    // ToAscii (fake): digits, letters (lower case) and space.
+
+    static unsigned to_ascii(std::uint32_t vk,std::uint8_t* out){
+
+        const bool printable=(vk>='0'&&vk<='9')||(vk>='A'&&vk<='Z')||vk==0x20;
+
+        if(printable){const std::uint16_t v=std::uint16_t(vk>='A'&&vk<='Z'?vk+0x20:vk);std::memcpy(out,&v,2);}
+
+        return printable?1u:0u;
+
+    }
+
+    void bind_34(std::uint32_t d,std::uint32_t field){                                  // +34: 4033B0 / 403A60
+
+        if(!keyboard(d)){
+
+            for(std::uint32_t k=0;k<32;++k)if(m.u8(d+0x2a4+k)>0x1eu){move_source(d,button_slot(field),k);return;}
+
+            return;}
+
+        std::int32_t key=-1;
+
+        for(std::uint32_t k=0;k<0x100;++k){const auto now=m.u8(d+0x1d0+k);if(now!=m.u8(d+0x2d0+k)&&(now&0x80u)){key=std::int32_t(k);break;}}
+
+        const std::uint32_t vk=scan_to_vk(std::uint32_t(key));                          // MapVirtualKeyExA(key, 3, GetKeyboardLayout(0))
+
+        if(vk){
+
+            std::uint8_t out[0x100]{};(void)to_ascii(vk,out);
+
+            std::uint16_t wide[0x100]{};key_name_wide(wide,out,3);
+
+            if(wide[0]==0xd1)return;                                                      // a character the font lacks
+
+        }
+
+        move_source(d,button_slot(field),std::uint32_t(key));
+
+    }
+
+    // ---- screen helpers ----
+
+    // 4D6700: the axis field of rows 1..16.
+
+    static std::uint32_t axis_field_4d6700(std::uint32_t row){
+
+        static constexpr std::int32_t Fields[16]{0,1,2,3,5,4,4,5,0,1,2,3,8,6,7,-1};
+
+        return row-1u<16u?std::uint32_t(Fields[row-1u]):0xffffffffu;
+
+    }
+
+    // 4D6790: the name text of an axis field.
+
+    std::uint32_t axis_name_4d6790(std::uint32_t field){
+
+        static constexpr std::uint32_t Ids[9]{0x498,0x499,0x49a,0x49b,0x49c,0x49d,0x49e,0x49f,0x496};
+
+        return field<9u?text(Ids[field]):0u;
+
+    }
+
+    // 4D7080: rows 1..6 and 13 (axes) for the pads, 7 and 8 (two more keys) for the keyboard.
+
+    void rows_4d7080(){
+
+        const bool kb=u(0x1d6c)==count()-1u;
+
+        const std::uint32_t on=0x4ed360u,off=0x4ed390u;
+
+        for(std::uint32_t r=1;r<=6;++r)(void)call(kb?on:off,List,{r});
+
+        (void)call(kb?off:on,List,{7});(void)call(kb?off:on,List,{8});
+
+        (void)call(kb?on:off,List,{0xd});
+
+    }
+
+    // 4D6EA0: the help line of the selected row.
+
+    void help_4d6ea0(){
+
+        const std::uint32_t r=u(0x1c6c)-1u;
+
+        std::uint32_t id=0x4a1;
+
+        if(r<16u){
+
+            static constexpr std::uint8_t Kind[16]{0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,2};
+
+            const auto kind=Kind[r];
+
+            if(kind==0){
+
+                if(i(0x1d70)!=-1&&i(0x1d68)==1){
+
+                    const auto name=axis_name_4d6790(axis_moved_38(dev(u(0x1d70))));
+
+                    message_48ca40(text(0x4a5),{name});return;}
+
+                const std::int32_t st=i(0x1d68);
+
+                if(st<=1)id=0x4a2;
+
+                else{
+
+                    const std::uint32_t f=u(0x1d78);
+
+                    switch(f){
+
+                    case 0:id=0x4a7+(st!=2);break;case 1:id=0x4a9+(st!=2);break;case 2:id=0x4ab+(st==2);break;
+
+                    case 3:id=0x4ad+(st!=2);break;case 4:id=0x4b1+(st!=2);break;case 5:id=0x4af+(st==2);break;
+
+                    default:id=0x4a7;break;}
+
+                }
+
+            }else if(kind==1)id=i(0x1d70)!=-1?0x4a6u:0x4a3u;
+
+            else id=0x4a4;
+
+        }
+
+        message_48ca40(text(id),{});
+
+    }
+
+    // 4D7010(field, axis): wait for the input of a row.
+
+    void listen_4d7010(std::uint32_t field,std::uint32_t axis){
+
+        m.put8(O+0x1d80,std::uint8_t(axis));put(0x1d70,u(0x1d6c));put(0x1d74,current());put(0x1d78,field);
+
+        set_timer(0x25a);listen_begin_28(dev(u(0x1d6c)));
+
+        select_404030(0xffffffffu);
+
+        m.put8(O+0x1c7f,1);put(0x1d68,1);
+
+    }
+
+    // 404050(device): the default assignments.
+
+    void defaults_404050(std::uint32_t k){
+
+        if(k==count()-1u){const std::uint32_t d=dev(k);for(std::uint32_t j=0;j<16;++j)m.put32(d+0x3d0+j*4,m.u32(0x61e6b8u+j*4));return;}
+
+        if(std::int32_t(k)<0||k>=count()-1u)return;
+
+        static constexpr std::uint32_t Axes[7]{8,8,2,0,4,1,3};
+
+        const std::uint32_t d=dev(k);
+
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+        static constexpr std::uint32_t DefaultPad[16]{0,2,1,3,7,9,4,5,12,13,14,15,7,6,8,9};
+#else
+        static constexpr std::uint32_t DefaultPad[16]{5,4,1,2,7,9,10,11,12,13,14,15,7,6,8,9};
+#endif
+        for(std::uint32_t j=0;j<16;++j)m.put32(d+0x70+j*4,DefaultPad[j]);
+        for(std::uint32_t j=0;j<7;++j)m.put32(d+0x54+j*4,Axes[j]);
+
+    }
+
+    // ---- 4D7E00 ----
+
+    std::uint32_t init_4d7e00(){
+
+        put(0x1d6c,current());put(0x1d70,0xffffffffu);put(0x1d74,current());put(0x1d7c,7);put(0x1d68,0);put(0x1d88,0);put(0x1d8c,0);
+
+        set_timer(0);
+
+        if(i(0x1d6c)<0&&count()!=0)put(0x1d6c,count()-1u);
+
+        const std::uint32_t mark=(OwnerBase&~0xffu)|(i(0x1d6c)>=0?3u:2u);           // a byte over the pushed ECX
+
+        const std::uint32_t title=text(0x4a1);
+
+        (void)call(0x48d0c0u,Window,{0x6255d5u,title,mark,fbits(float(std::int32_t(g(0x692c40u)))),fbits(float(std::int32_t(g(0x692c2cu)))),
+
+            fbits(float(std::int32_t(g(0x692c3cu)))),fbits(float(std::int32_t(g(0x692c30u)))),g(0x692b28u),0u});
+
+        (void)call(0x48ee80u,0,{Window+0xdec,text(0x295)});                             // 48CBC0
+
+        (void)call(0x48ee80u,0,{Window+0x960,text(0x296)});                             // 48CBE0
+
+        (void)call(0x4ecfb0u,List,{0u,fbits(float(window_height_48ca90())),1u,0u,0u});
+
+        const float y=driving::x87_float(window_y_48cae0()+driving::X87(44.0f));       // 5B0270
+
+        const float x=driving::x87_float(window_x_48cad0());
+
+        (void)call(0x4ed8a0u,List,{fbits(x),fbits(y)});
+
+        (void)call(0x4ed880u,List,{0x41880000u});
+
+        (void)call(0x4ed8c0u,List,{g(0x692b2cu)});
+
+        for(std::uint32_t k=0;k<g(0x692c94u);++k)(void)call(0x4ed160u,List,{text(g(0x692c50u+k*4)),0u});
+
+        rows_4d7080();
+
+        put(0x9ac,u(0x9ac)+1u);
+
+        return 1u;
+
+    }
+
+    // ---- 4D6E50 ----
+
+    std::uint32_t close_4d6e50(){
+
+        if(i(0x1d70)!=-1){put(0x1d6c,u(0x1d70));select_404030(u(0x1d78));}
+
+        put(0x1d70,0xffffffffu);
+
+        (void)call(0x4eda60u,List,{});
+
+        const std::uint32_t r=vcall_owner(Window,0x10,{});
+
+        m.put8(O+0x9b8,1);
+
+        return r;                                                                        // EAX of the window call
+
+    }
+
+    // 4D6900(field, device): the name of the key / button of a field (84B100).
+
+    std::uint32_t source_name_4d6900(std::uint32_t field,std::uint32_t d){
+
+        m.put8(Text84b100,0);
+
+        if(u(0x1d6c)!=count()-1u){
+
+            const std::uint32_t idx=source_1c(d,field);
+
+            sprintf_84b100(text(0x4a0),{idx+1u});return Text84b100;}
+
+        const std::uint32_t key=source_1c(d,field);
+
+        const std::uint32_t vk=scan_to_vk(key);
+
+        if(!vk){                                                                         // 4D6860: by scan code
+
+            for(std::uint32_t e=0x5cc200u,k=0;e<0x5cc8c0u;e+=12,++k)if(m.u32(e)==key){sprintf_84b100(text(m.u32(0x5cc208u+k*12)),{});break;}
+
+            return Text84b100;}
+
+        for(std::uint32_t e=0x5cc204u,k=0;e<0x5cc8c4u;e+=12,++k)                        // 4D68B0: by virtual key
+
+            if(m.u32(e)==vk){sprintf_84b100(text(m.u32(0x5cc208u+k*12)),{});break;}
+
+        if(m.u8(Text84b100))return Text84b100;
+
+        std::uint8_t out[0x100]{};(void)to_ascii(vk,out);
+
+        sprintf_84b100(0x626460u,{std::uint32_t(std::int32_t(std::int8_t(out[0])))});  // "%c"
+
+        std::uint16_t wide[0x100]{};std::uint8_t narrow[4];for(unsigned k=0;k<4;++k)narrow[k]=m.u8(Text84b100+k);
+
+        std::uint8_t zero_ended[5]{narrow[0],narrow[1],narrow[2],narrow[3],0};
+
+        key_name_wide(wide,zero_ended,4);
+
+        for(unsigned k=0;wide[k];++k)m.put8(Text84b100+k,std::uint8_t(wide[k]));            // 445E10 (no terminator)
+
+        return Text84b100;
+
+    }
+
+    // 445D40(device, devices, x, y, height, scale): the arrows of the device row (42D280).
+
+    void arrows_445d40(std::int32_t k,std::int32_t n,std::int32_t x,std::int32_t y,std::int32_t height,std::uint32_t scale){
+
+        if(k>0)(void)call(0x42d280u,0,{0x3004au,std::uint32_t(x-0xc),std::uint32_t(y+3),0u,scale,0xffffffffu});
+
+        if(k<n-1)(void)call(0x42d280u,0,{0x3004au,std::uint32_t(x+height-0xc),std::uint32_t(y+3),1u,scale,0xffffffffu});
+
+    }
+
+    // ---- 4D6A60 ----
+
+    std::uint32_t display_4d6a60(){
+
+        (void)call(0x4ed3e0u,List,{});
+
+        bool none=i(0x1d6c)==-1;
+
+        std::uint32_t d=0;std::array<std::uint8_t,0x244> info{};
+
+        if(!none){d=dev(u(0x1d6c));device_instance(info.data(),keyboard(d));}          // GetDeviceInfo (fake: always succeeds)
+
+        std::int32_t drawn=0;
+
+        for(std::uint32_t row=0;row<0x11;++row){
+
+            std::uint32_t label=0;
+
+            (void)call(0x42ca60u,0,{9});(void)call(0x42ccb0u,0,{g(0x692b30u)});(void)call(0x42cca0u,0,{0xff3f474au});
+
+            const float step=float(drawn)*17.0f;
+
+            auto row_y=[&]{return std::int32_t(float(driving::x87_ftol32(window_y_48cae0())+0x2c)+step);};
+
+            const std::int32_t x=std::int32_t(m.f32(0x692becu));
+
+            (void)call(0x42cc00u,0,{std::uint32_t(x),std::uint32_t(row_y())});
+
+            const bool kb=u(0x1d6c)==count()-1u;
+
+            if(none)label=text(row==0?0x497u:0x496u);
+
+            else switch(row){
+
+            case 0:{
+
+                m.put8(Text84b100,0);
+
+                std::uint32_t name=Name;
+
+                for(unsigned k=0;k<0x104;++k)m.put8(Name+k,info[0x12c+k]);
+
+                if(current()==u(0x1d6c)){sprintf_84b100(0x5ccbe0u,{Name});name=Text84b100;}
+
+                const std::int32_t half=window_height_48ca90()/2;
+
+                arrows_445d40(i(0x1d6c),std::int32_t(count()),x,row_y(),half,fbits(float(std::int32_t(g(0x692b30u)))));
+
+                label=name;break;}
+
+            case 1:case 2:case 3:case 4:case 5:case 6:{
+
+                static constexpr std::uint32_t Fields[7]{0,0,1,2,3,5,4};
+
+                if(kb)break;
+
+                const std::uint32_t k=Fields[row];
+
+                label=axis_name_4d6790(k<7u?m.u32(d+0x54+k*4):8u);break;}
+
+            case 7:if(kb)label=source_name_4d6900(4,d);break;
+
+            case 8:if(kb)label=source_name_4d6900(5,d);break;
+
+            case 9:label=source_name_4d6900(0,d);break;
+
+            case 10:label=source_name_4d6900(1,d);break;
+
+            case 11:label=source_name_4d6900(2,d);break;
+
+            case 12:label=source_name_4d6900(3,d);break;
+
+            case 13:if(!kb)label=source_name_4d6900(8,d);break;
+
+            case 14:label=source_name_4d6900(6,d);break;
+
+            case 15:label=source_name_4d6900(7,d);break;
+
+            default:break;
+
+            }
+
+            if(i(0x1d68)>1&&u(0x1c6c)==row){
+
+                const std::int32_t v=i(0x1d84)+0x7fff;
+
+                std::int32_t q=std::int32_t((std::int64_t(v)*std::int64_t(std::int32_t(0xa003c017u)))>>32)+v;q>>=12;q+=std::int32_t(std::uint32_t(q)>>31);
+
+                m.put32(Prompt+0xac,std::uint32_t(q));                                      // 446430
+
+                (void)call(0x4469c0u,Prompt,{});
+
+                ++drawn;
+
+            }else if(label){
+
+                const std::int32_t half=window_height_48ca90()/2;
+
+                const std::int32_t at=driving::x87_ftol32(driving::X87(half)*driving::X87(0.8));   // 5CCBD8
+
+                (void)call(0x42ce70u,0,{std::uint32_t(at),0x626468u,label});
+
+                ++drawn;
+
+            }
+
+        }
+
+        return 0x11;                                                                     // EAX: the row counter
+
+    }
+
+    // ---- 4D7FB0 ----
+
+    std::uint32_t control_4d7fb0(){
+
+        std::uint32_t choice=0xc;
+
+        const std::int32_t row=i(0x1c6c);
+
+        if(std::int32_t(timer())>0)set_timer(timer()-1u);
+
+        else{
+
+            choice=vcall_owner(O,0x14,{1});
+
+            if(i(0x1d6c)!=-1){
+
+                const std::uint32_t kbd=dev(count()-1u);                              // 4037E0(0x0E): backspace on the keyboard
+
+                if(m.u8(kbd+4)&&(m.u8(kbd+0x1d0+0xe)>>7)){
+
+                    if(row>0&&row<=6){(void)set_axis_24(dev(u(0x1d6c)),axis_field_4d6700(std::uint32_t(row)),8);return 0;}
+
+                    if(row>6){(void)set_source_20(dev(u(0x1d6c)),axis_field_4d6700(std::uint32_t(row)),0xffffffffu);return 0;}
+
+                    return 0;
+
+                }
+
+            }
+
+        }
+
+        const std::int32_t editing=i(0x1d70),state=i(0x1d68);
+
+        if(editing!=-1&&state==1){
+
+            const std::uint32_t d=dev(std::uint32_t(editing));
+
+            bool go=pressed_3c(d)!=-1;
+
+            if(go)set_timer(0);
+
+            else if(std::int32_t(timer())<=0)go=true;
+
+            else{
+
+                (void)InputFrame(c,s).update(d);                                            // +10 (4023E0)
+
+                if(driving::X87(541.799988f)>driving::X87(std::int32_t(timer()))){(void)listen_2c(d,8);}   // 5CCBF8
+
+                help_4d6ea0();return 0;
+
+            }
+
+            if(!m.u8(O+0x1d80)){                                                            // a button / key
+
+                bind_34(d,u(0x1d78));select_404030(u(0x1d74));
+
+                put(0x1d70,0xffffffffu);m.put8(O+0x1c7f,0);put(0x1d68,0);set_timer(0x3c);
+
+                help_4d6ea0();return 0;
+
+            }
+
+            put(0x1d7c,axis_moved_38(d));apply_axis_30(d,u(0x1d78));
+
+            const std::int32_t list_row=i(0x1c6c);
+
+            const std::int32_t top=driving::x87_ftol32(window_y_48cae0());
+
+            const float py=float(std::int32_t(top+std::int32_t(g(0x692ca0u))+0x2c))+float(list_row)*17.0f-240.0f;   // 628074, 6281CC
+
+            (void)call(0x446340u,Prompt,{0x5cc048u,0u,10u,g(0x692bbcu),fbits(py),g(0x692b30u)});
+
+            put(0x1d68,2);set_timer(0x25a);listen_begin_28(d);
+
+            help_4d6ea0();return 0;
+
+        }
+
+        if(state>1){
+
+            const std::uint32_t d=dev(u(0x1d70));
+
+            put(0x1d84,0);
+
+            (void)InputFrame(c,s).update(d);
+
+            if(driving::X87(541.799988f)>driving::X87(std::int32_t(timer()))){
+
+                put(0x1d84,listen_2c(d,u(0x1d7c)));
+
+                if(pressed_3c(d)!=-1&&choice==0xc){set_timer(0x25a);listen_begin_28(d);choice=0;}
+
+            }
+
+            help_4d6ea0();
+
+        }
+
+        switch(choice){
+
+        case 0:{
+
+            if(i(0x1d6c)!=-1&&i(0x1d68)==0){
+
+                if(std::uint32_t(row)>16u)return 0;
+
+                static constexpr std::int32_t Field[17]{-1,0,1,2,3,5,4,4,5,0,1,2,3,8,6,7,-2};
+
+                static constexpr std::uint8_t Axis[17]{0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0};
+
+                if(row==0){select_404030(u(0x1d6c));return 0;}
+
+                if(row==16){if(i(0x1d6c)>=0){defaults_404050(u(0x1d6c));rows_4d7080();}return 0;}
+
+                listen_4d7010(std::uint32_t(Field[row]),Axis[row]);return 0;
+
+            }
+
+            const std::int32_t st=i(0x1d68);
+
+            if(st<=1)return 0;
+
+            if(st==2){put(0x1d88,u(0x1d84));put(0x1d8c,0);put(0x1d68,3);return 0;}
+
+            set_timer(0x3c);
+
+            put(0x1d8c,u(0x1d84));
+
+            {const std::uint32_t d=dev(u(0x1d70)),e=u(0x1d7c);
+
+             if(!keyboard(d)){m.put32(d+0x170+e*8,u(0x1d88));m.put32(d+0x174+e*8,u(0x1d84));}}   // +18 (403590 / 403C60)
+
+            (void)call(0x465250u,Prompt+4,{});                                            // 4C5440
+
+            put(0x1d84,0);put(0x1d68,0);select_404030(u(0x1d74));put(0x1d70,0xffffffffu);m.put8(O+0x1c7f,0);
+
+            help_4d6ea0();return 0;}
+
+        case 1:{
+
+            std::uint32_t done=1;
+
+            for(std::uint32_t k=0;k<count();++k){
+
+                const std::uint32_t d=dev(k),rec=DevicesBase+k*0xb0u;
+
+                for(std::uint32_t j=0;j<16;++j)m.put8(rec+4+j,m.u8(d+0x3c+j));                // 4D5B40
+
+                for(std::uint32_t j=0;j<7;++j)m.put32(rec+0x14+j*4,m.u32(d+0x54+j*4));
+
+                for(std::uint32_t j=0;j<16;++j)m.put32(rec+0x30+j*4,m.u32(d+map_base(d)+j*4));
+
+                for(std::uint32_t j=0;j<16;++j)m.put32(rec+0x70+j*4,m.u32(d+0x170+j*4));
+
+                m.put8(rec,1);
+
+            }
+
+            m.put8(0x7c27d4u,std::uint8_t(m.u8(0x7c27d4u)|2u));
+
+            put(0x9ac,u(0x9ac)+1u);put(0x9b4,6);put(0x9b0,done);
+
+            return 0;}
+
+        case 2:if(i(0x1d68)<1){(void)call(0x4ed250u,List,{});help_4d6ea0();}return 0;
+
+        case 4:if(i(0x1d68)<1){(void)call(0x4ed2a0u,List,{});help_4d6ea0();}return 0;
+
+        case 3:case 5:{
+
+            if(row!=0||i(0x1d68)>=1)return 0;
+
+            std::int32_t k=i(0x1d6c);
+
+            if(choice==3){if(k<=0)return 0;--k;}
+
+            else{if(k>=std::int32_t(count())-1)return 0;++k;}
+
+            put(0x1d6c,std::uint32_t(k));rows_4d7080();(void)call(0x4249f0u,0,{1});
+
+            return 0;}
+
+        }
+
+        return 0;
+
+    }
+
+};
+
+}
+
 bool native_pc_input_config_runner(void* user,std::uint32_t pc,FrontendTitleWidgets& owner,std::uint32_t& result){
     auto& c=*static_cast<NativeRuntimeContext*>(user);
     if(!state().created&&!native_pc_input_create_403de0(c))return false;
@@ -1110,7 +1528,12 @@ bool native_pc_input_create_403de0(NativeRuntimeContext& c){
 // start Plus, 6 brake ZL, 7 accelerate ZR; 8..11 unassigned (the D-pad is the
 // POV); 13..15 the PC defaults.
 // set through the device's +14 method (402420) as 4040F0 does for a saved one.
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+// PS Vita default layout: R(5)=Accelerate, L(4)=Brake, Cross(0)=Gear Up, Square(2)=Gear Down, Triangle(3)=View, Circle(1)=Horn, Start(7)=Start
+constexpr std::uint32_t SwitchButtons[16]{0,2,1,3,7,9,4,5,12,13,14,15,7,6,8,9};
+#else
 constexpr std::uint32_t SwitchButtons[16]{5,4,1,2,7,9,10,11,12,13,14,15,7,6,8,9};
+#endif
 constexpr std::uint32_t SwitchAxes[7]{8,8,2,0,4,1,3};   // the PC defaults (402640): steering = lX
 bool native_pc_input_profile_4040f0(NativeRuntimeContext& c){
     if(!state().created&&!native_pc_input_create_403de0(c))return false;

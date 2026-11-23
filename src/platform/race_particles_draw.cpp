@@ -10,6 +10,9 @@
 // the service in the same order.
 #include "platform/race_particles_port.hpp"
 #include "platform/pc_screen.hpp"
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 namespace outrun::platform {
 using namespace particles_detail;
 namespace {
@@ -21,6 +24,9 @@ struct D {
     void tss(std::uint32_t st_,std::uint32_t t,std::uint32_t v){if(d.get_texture_stage_state(st_,t)!=v)d.set_texture_stage_state(st_,t,v);}
     void ss(std::uint32_t st_,std::uint32_t t,std::uint32_t v){if(d.get_sampler_state(st_,t)!=v)d.set_sampler_state(st_,t,v);}
     void draw(std::uint32_t type,std::uint32_t count,std::uint32_t data,std::uint32_t stride,std::uint32_t vertices){
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        outrun::vita_profile::set_active_model(outrun::vita_profile::RES_ID_PARTICLES, 0);
+#endif
         d.draw_primitive_up(type,count,p.m.at(data,std::size_t(vertices)*stride),stride);
     }
     void matrix(std::array<float,16>& out)const{const auto b=p.current();for(unsigned k=0;k<16;++k)out[k]=b.f32(k*4);}
@@ -89,8 +95,9 @@ void tire_mark_disp_486450(D& d){
     p.call(0x409df0u,{6});                                 // 409DF0(6) -> 410F90(current, 6)
     d.set_transform(0x100);                                // 409E00(6): D3DTS_WORLD
     for(std::uint32_t esi=0x64fe28u,n=0;n<3;++n,esi+=0x14){
-        d.d.set_texture(0,p.u(esi+4));
         const std::uint32_t count=p.u(esi-4)*2u;
+        if(!count)continue;
+        d.d.set_texture(0,p.u(esi+4));
         d.draw(4,count,p.u(esi),0x18,count*3u);
     }
     p.pop();
@@ -123,7 +130,11 @@ std::uint32_t draw_418cf0(D& d,std::uint32_t buffer,std::uint32_t src){
         uv(0,x0,y0,u0,v0);uv(1,x0,y1,u1,v0);uv(2,x1,y0,u0,v1);uv(3,x1,y0,u0,v1);uv(4,x0,y1,u1,v0);uv(5,x1,y1,u1,v1);
         ++count;
         esi+=0xa8u;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        if(count>=64u||esi==0x8d1378u)break;
+#else
         if(esi==0x8d1378u)break;
+#endif
     }
     if(count)d.draw(4,count*2u,0x8bc2f8u,0x1c,count*6u);
     p.pop();
@@ -208,17 +219,29 @@ std::uint32_t draw_419dc0(D& d,std::uint32_t buffer,std::uint32_t src){
     d.rs(0x16,1);d.rs(0x18,0);d.rs(0x1b,1);d.rs(0xab,1);
     d.rs(0x07,p.u(src+0x7c)?1u:0u);d.rs(0x0e,0);
     std::uint32_t count=0;
-    for(std::uint32_t k=0,list=0x8d1318u,a=buffer;k<p.u(src+4);++k,a+=0x5c)
-        if(p.i(a)<0){++count;p.put(list,a);list+=0x14;}
+    const std::uint32_t max_slots=p.u(src+4);
+    for(std::uint32_t k=0,list=0x8d1318u,a=buffer;k<max_slots;++k,a+=0x5c){
+        if(p.i(a)<0){
+            ++count;p.put(list,a);list+=0x14;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            if(count>=64u)break; // shortcut: cap camera-facing particles at 64 on Vita, raise if CPU budget allows
+#endif
+        }
+    }
     const std::uint32_t M=p.u(0x79f574u)+0x140u;               // 483EC0
     std::uint32_t n=count;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    if(std::int32_t(n)>=64){n=64;}
+#else
     if(std::int32_t(n)>=0x200){n=0x200;}
+#endif
+    const X m0=p.x(M),m4=p.x(M+4),m10=p.x(M+0x10),m14=p.x(M+0x14),m20=p.x(M+0x20),m24=p.x(M+0x24),src_sz=p.x(src+0x44);
     for(std::uint32_t k=0,list=0x8d1318u,ecx=0x8a92f4u;k<n;++k,list+=0x14,ecx+=0x90){
         const std::uint32_t q=p.u(list);
-        const X s=p.x(q+0x20)*p.x(src+0x44);
-        const float a=st(p.x(M)*s),b=st(p.x(M+0x10)*s);
-        const float c=st(p.x(M+0x20)*s),dd=st(p.x(M+4)*s),e=st(p.x(M+0x14)*s);
-        const X f=s*p.x(M+0x24);
+        const X s=p.x(q+0x20)*src_sz;
+        const float a=st(m0*s),b=st(m10*s);
+        const float c=st(m20*s),dd=st(m4*s),e=st(m14*s);
+        const X f=s*m24;
         auto vert=[&](std::uint32_t at,float x,float y,float z,std::uint32_t col,std::uint32_t u,std::uint32_t v){
             p.putf(at,x);p.putf(at+4,y);p.putf(at+8,z);p.put(at+0xc,col);p.put(at+0x10,u);p.put(at+0x14,v);};
         // vertex 0 (ecx-4)
@@ -253,6 +276,10 @@ std::uint32_t draw_419dc0(D& d,std::uint32_t buffer,std::uint32_t src){
 // Point sprites: 41A6F0 (type 5, 0x50-byte particles) and 41AE40 (type 6,
 // 0x28-byte particles, one draw per texture frame).
 std::uint32_t draw_41a6f0(D& d,std::uint32_t buffer,std::uint32_t src){
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    (void)d;(void)buffer;(void)src;
+    return 0u; // VitaGlD3D9Device::draw_primitive_up ignores D3DPT_POINTLIST (type 1)
+#else
     P& p=d.p;
     const std::uint32_t colour=p.u(src+0x4c);
     std::uint32_t count=0;
@@ -270,14 +297,23 @@ std::uint32_t draw_41a6f0(D& d,std::uint32_t buffer,std::uint32_t src){
         if(p.i(a)>=0)continue;
         p.put(out-4,p.u(a+4));p.put(out,p.u(a+8));p.put(out+4,p.u(a+0xc));p.put(out+8,colour);
         ++count;out+=0x10;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        if(count>=64u||out>=0x8de30cu)break;
+#else
         if(out>=0x8de30cu)break;
+#endif
     }
     if(count)d.draw(1,count,0x8d6308u,0x10,count);
     d.d.set_texture(3,0);d.tss(3,1,1);
     d.rs(0x9c,0);d.rs(0x9d,0);d.rs(0x1b,0);d.rs(0x1d,1);d.rs(0xa8,0xf);
     return count;
+#endif
 }
 std::uint32_t draw_41ae40(D& d,std::uint32_t buffer,std::uint32_t src){
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    (void)d;(void)buffer;(void)src;
+    return 0u; // VitaGlD3D9Device::draw_primitive_up ignores D3DPT_POINTLIST (type 1)
+#else
     P& p=d.p;
     const std::uint32_t colour=p.u(src+0x4c);
     const float size=st(p.x(src+0x48)*X(fb(0x3b088889u)));
@@ -302,6 +338,7 @@ std::uint32_t draw_41ae40(D& d,std::uint32_t buffer,std::uint32_t src){
     d.d.set_texture(3,0);d.tss(3,1,1);
     d.rs(0x9c,0);d.rs(0x9d,0);d.rs(0x1b,0);d.rs(0x1d,1);d.rs(0xa8,0xf);
     return count;
+#endif
 }
 // 418490 nlParticleDraw.
 void particle_draw_418490(D& d){
@@ -350,8 +387,6 @@ void particles_display_41bd10(PcParticleContext& pc){
     g_pc_gpu_zone=1;
     tire_mark_disp_486450(d);
     g_pc_gpu_zone=0;
-    restore_41b7a0(d);
-    save_41b5c0(d);
     particle_draw_418490(d);
     restore_41b7a0(d);
 }

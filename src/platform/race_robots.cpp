@@ -223,6 +223,13 @@ void race_robot_motion_connect_487b70(PcRaceContext& c,std::uint32_t work,std::u
 void race_robot_control_488450(PcRaceContext& c,std::uint32_t work){
     Port p(c);auto& m=p.m;
     if(m.u32(work+4)&0x10000u)return;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    // At 30 FPS (max_ticks=2), stagger skeletal Calc + hair physics to 30 Hz without starving any robot.
+    static std::uint32_t s_rob_first_work = 0;
+    static std::uint32_t s_rob_tick = 0;
+    if (s_rob_first_work == 0 || work == s_rob_first_work) { s_rob_first_work = work; ++s_rob_tick; }
+    if (s_rob_tick & 1u) return;
+#endif
     const std::uint32_t mot=p.motion(work);
     p.call(0x4f2520u,{},mot);                        // Calc
     const std::uint32_t f=m.u32(work+4);
@@ -253,6 +260,15 @@ void race_robot_driver_display_4879b0(PcRaceContext& c,std::uint32_t work){
 }
 void race_robot_flagman_display_4879d0(PcRaceContext& c,std::uint32_t work){
     Port p(c);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    // Skip start-line flagman skeleton + cloth draw once player is >55m away.
+    const std::uint32_t car = p.car();
+    if (car) {
+        const float dx = p.m.f32(work + 0x40) - p.m.f32(car + 0x14);
+        const float dz = p.m.f32(work + 0x48) - p.m.f32(car + 0x1c);
+        if (dx * dx + dz * dz > (55.0f * 55.0f)) return;
+    }
+#endif
     race_robot_display_487880(c,work);
     if(p.m.u32(work+4)&0x8000u){
         p.push_unit();

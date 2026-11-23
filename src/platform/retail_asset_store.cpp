@@ -11,6 +11,16 @@
 #include <strings.h>
 #endif
 #include "system/files.hpp"
+#include "system/exe_image.hpp"
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#define VITA_LOG(fmt, ...) do { \
+    std::printf(fmt, ##__VA_ARGS__); \
+    outrun::vita_profile::log_message(fmt, ##__VA_ARGS__); \
+} while(0)
+#else
+#define VITA_LOG(fmt, ...) std::printf(fmt, ##__VA_ARGS__)
+#endif
 
 namespace outrun::platform {
 namespace {
@@ -77,10 +87,16 @@ bool file_exists(const std::string& path){
 }
 
 std::string normalize_relative(std::string path){
-    while(!path.empty()&&(path.front()=='\\'||path.front()=='/'))path.erase(path.begin());
-    for(char& c:path)if(c=='\\')c='/';
-    if(path.find("..")!=std::string::npos)return {};
-    return path;
+    std::string out;
+    out.reserve(path.size());
+    for(char c:path){
+        if(c=='\\')c='/';
+        if(c=='/'&&(out.empty()||out.back()=='/'))continue;
+        out.push_back(c);
+    }
+    while(!out.empty()&&out.back()=='/')out.pop_back();
+    if(out.find("..")!=std::string::npos)return {};
+    return out;
 }
 
 bool inflate_exact(const std::vector<std::uint8_t>& input,std::vector<std::uint8_t>& output,
@@ -94,15 +110,22 @@ bool inflate_exact(const std::vector<std::uint8_t>& input,std::vector<std::uint8
     if(inflateInit(&stream)!=Z_OK){fail(error,"zlib inflateInit failed");return false;}
     std::array<std::uint8_t,64u*1024u> chunk{};
     int rc=Z_OK;
-    while(rc==Z_OK){
-        stream.next_out=reinterpret_cast<Bytef*>(chunk.data());
-        stream.avail_out=static_cast<uInt>(chunk.size());
-        rc=inflate(&stream,Z_NO_FLUSH);
-        const auto produced=chunk.size()-stream.avail_out;
-        if(produced>max_bytes-output.size()){
-            inflateEnd(&stream);output.clear();fail(error,"inflated retail asset exceeds limit");return false;
+    try{
+        while(rc==Z_OK){
+            stream.next_out=reinterpret_cast<Bytef*>(chunk.data());
+            stream.avail_out=static_cast<uInt>(chunk.size());
+            rc=inflate(&stream,Z_NO_FLUSH);
+            const auto produced=chunk.size()-stream.avail_out;
+            if(produced>max_bytes-output.size()){
+                inflateEnd(&stream);output.clear();fail(error,"inflated retail asset exceeds limit");return false;
+            }
+            output.insert(output.end(),chunk.data(),chunk.data()+produced);
         }
-        output.insert(output.end(),chunk.data(),chunk.data()+produced);
+    }catch(const std::exception& e){
+        inflateEnd(&stream);output.clear();
+        VITA_LOG("[TRACK_LOAD] INFLATE ALLOC FAILED: %s\n",e.what());
+        fail(error,"out of memory inflating retail .sz");
+        return false;
     }
     const bool ok=rc==Z_STREAM_END&&stream.avail_in==0u;
     inflateEnd(&stream);
@@ -120,7 +143,7 @@ bool retail_asset_inflate_sz(const std::vector<std::uint8_t>& input,std::vector<
     return inflate_exact(input,output,128u*1024u*1024u,error);
 }
 namespace {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(OR2_VITA) && !defined(__VITA__) && !defined(__psp2__)
 // The game names its files in several cases ("CARS/" for the Cars folder...).
 // FAT/exFAT/NTFS ignore case; a case-sensitive file system (a PS5 package,
 // Linux) needs each path component matched against the real directory names.
@@ -131,9 +154,11 @@ std::string case_resolved(const std::string& root,const std::string& rel){
     for(std::size_t start=0;start<=rel.size();){
         const auto slash=rel.find('/',start);
         const auto part=rel.substr(start,slash==std::string::npos?std::string::npos:slash-start);
-        std::string match=part;
-        for(const auto& name:directory_names(dir))if(strcasecmp(name.c_str(),part.c_str())==0){match=name;break;}
-        out+=(out.empty()?"":"/")+match;dir+="/"+match;
+        if(!part.empty()){
+            std::string match=part;
+            for(const auto& name:directory_names(dir))if(strcasecmp(name.c_str(),part.c_str())==0){match=name;break;}
+            out+=(out.empty()?"":"/")+match;dir+="/"+match;
+        }
         if(slash==std::string::npos)break;
         start=slash+1;
     }
@@ -145,8 +170,10 @@ std::string case_resolved(const std::string& root,const std::string& rel){
 std::string retail_asset_path(const RetailAssetStore& store,const std::string& relative){
     auto rel=normalize_relative(relative);if(rel.empty())return {};
     if(store.root.empty())return rel;
-    const std::string root=(store.root.back()=='/'||store.root.back()=='\\')?store.root.substr(0,store.root.size()-1):store.root;
-#ifndef _WIN32
+    std::string root=store.root;
+    for(char& c:root)if(c=='\\')c='/';
+    while(!root.empty()&&root.back()=='/')root.pop_back();
+#if !defined(_WIN32) && !defined(OR2_VITA) && !defined(__VITA__) && !defined(__psp2__)
     if(!file_exists(root+"/"+rel))rel=case_resolved(root,rel);
 #endif
     return root+"/"+rel;
@@ -169,16 +196,52 @@ bool retail_asset_store_open(RetailAssetStore& store,const std::string& root,std
     store={};store.root=root;return true;
 }
 
-bool retail_asset_read_relative(RetailAssetStore& store,const std::string& relative,
+bool retail_asset_read_relative(RetailAssetStore& store,const std::string& relative_in,
                                 std::vector<std::uint8_t>& bytes,std::size_t max_bytes,
                                 std::string* error){
     if(error)error->clear();
+    const std::string relative=normalize_relative(relative_in);
     const auto path=retail_asset_path(store,relative);
     if(path.empty()){fail(error,"invalid retail relative path");return false;}
-    std::FILE* file=std::fopen(path.c_str(),"rb");if(!file){fail(error,"retail file missing");return false;}
+    std::FILE* file=std::fopen(path.c_str(),"rb");
+    const bool file_found = (file != nullptr);
+    if(relative.find("Stage")!=std::string::npos||
+       relative.find("Scripts")!=std::string::npos||
+       relative.find("csc_data")!=std::string::npos||
+       relative.find("CARS")!=std::string::npos||
+       relative.find("Common")!=std::string::npos){
+        VITA_LOG("[TRACK_LOAD] Requesting track file: %s (result: %s)\n",
+                 relative.c_str(), file_found ? "OK" : "MISSING");
+    }
+    if(!file){
+        if(relative.size() < 3 || relative.rfind(".sz") != relative.size() - 3){
+            const auto sz_path = retail_asset_path(store, relative + ".sz");
+            if(!sz_path.empty()){
+                std::FILE* sz_file = std::fopen(sz_path.c_str(), "rb");
+                if(sz_file){
+                    std::fclose(sz_file);
+                    std::string sz_err;
+                    if(retail_asset_read_relative_inflated(store, relative + ".sz", bytes, max_bytes, &sz_err)){
+                        VITA_LOG("[TRACK_LOAD] Successfully loaded inflated fallback for: %s.sz\n", relative.c_str());
+                        return true;
+                    }
+                }
+            }
+        }
+        fail(error,"retail file missing");
+        return false;
+    }
     if(std::fseek(file,0,SEEK_END)!=0){std::fclose(file);fail(error,"cannot size retail file");return false;}
     const auto length=std::ftell(file);if(length<0||static_cast<std::uint64_t>(length)>max_bytes){std::fclose(file);fail(error,"retail file exceeds size limit");return false;}
-    std::rewind(file);bytes.resize(static_cast<std::size_t>(length));
+    std::rewind(file);
+    try{
+        bytes.resize(static_cast<std::size_t>(length));
+    }catch(const std::exception& e){
+        std::fclose(file);
+        VITA_LOG("[TRACK_LOAD] ALLOC FAILED for '%s' (size=%ld): %s\n",relative.c_str(),long(length),e.what());
+        fail(error,"out of memory reading retail file");
+        return false;
+    }
     const auto got=bytes.empty()?0u:std::fread(bytes.data(),1,bytes.size(),file);const int extra=std::fgetc(file);std::fclose(file);
     if(got!=bytes.size()||extra!=EOF){bytes.clear();fail(error,"retail file read mismatch");return false;}
     ++store.file_reads;store.bytes_read+=bytes.size();return true;
@@ -222,14 +285,51 @@ const LoaderAssetRecord* retail_asset_lookup(RetailAssetStore& store,
                 for(std::size_t i=0;i<VehicleResourceIds.size();++i)
                     if(VehicleResourceIds[i]==resource_id){relative=VehicleResourcePaths[i];break;}
             }
-            if(relative.empty())return nullptr;
+            if(relative.empty()&&resource_id<0x223u&&exe_image_loaded()){
+                try {
+                    const std::uint32_t token=exe_image_u32(0x633558u+resource_id*4u);
+                    if(token!=0u){
+                        for(std::uint32_t i=0;i<200u;++i){
+                            const char ch=char(*exe_image_bytes(token+i,1));
+                            if(!ch)break;
+                            relative.push_back(ch);
+                        }
+                    }
+                }catch(...){}
+            }
+            if(relative.empty()){
+                VITA_LOG("[retail_asset] Resource lookup not found: id=%u mode=%u, providing fallback stub\n",
+                         resource_id, request_mode);
+                LoaderAssetRecord bypass{};
+                bypass.resource_id=resource_id;bypass.request_mode=request_mode;
+                bypass.bytes.resize(16,0);
+                return &store.loader_cache.emplace(k,std::move(bypass)).first->second;
+            }
         }
     }
+    relative=normalize_relative(relative);
+    VITA_LOG("[retail_asset] Resource request id=%u mode=%u -> relative: '%s'\n",
+             resource_id, request_mode, relative.c_str());
     LoaderAssetRecord record{};record.resource_id=resource_id;record.request_mode=request_mode;
-    const bool ok=inflate_owner?
-        retail_asset_read_relative_inflated(store,relative,record.bytes,128u*1024u*1024u,error):
-        retail_asset_read_relative(store,relative,record.bytes,128u*1024u*1024u,error);
-    if(!ok)return nullptr;
+    std::string local_err;
+    std::string* err_out = error ? error : &local_err;
+    bool ok=inflate_owner?
+        retail_asset_read_relative_inflated(store,relative,record.bytes,128u*1024u*1024u,err_out):
+        retail_asset_read_relative(store,relative,record.bytes,128u*1024u*1024u,err_out);
+    if(!ok&&!inflate_owner&&*err_out!="retail file missing"){
+        std::string err_sz;
+        if(retail_asset_read_relative_inflated(store,relative,record.bytes,128u*1024u*1024u,&err_sz)){
+            ok=true;
+        }
+    }
+    VITA_LOG("[TRACK_LOAD] Requesting track file: %s (result: %s)\n",
+             relative.c_str(), ok ? "OK" : "MISSING");
+    if(!ok){
+        VITA_LOG("[retail_asset] File read failed for '%s' (id=%u mode=%u), providing bypass stub: %s\n",
+                 relative.c_str(), resource_id, request_mode, err_out->c_str());
+        record.bytes.resize(16,0);
+        return &store.loader_cache.emplace(k,std::move(record)).first->second;
+    }
     return &store.loader_cache.emplace(k,std::move(record)).first->second;
 }
 
@@ -243,11 +343,35 @@ const std::vector<std::uint8_t>* retail_asset_guest_path(
     if(auto it=store.path_cache.find(cache_key);it!=store.path_cache.end()){
         ++store.cache_hits;return &it->second;
     }
+    VITA_LOG("[retail_asset] Guest path request: '%s' (inflate=%d)\n", relative.c_str(), int(inflate_sz));
     std::vector<std::uint8_t> bytes;
-    const bool ok=inflate_sz?
-        retail_asset_read_relative_inflated(store,relative,bytes,128u*1024u*1024u,error):
-        retail_asset_read_relative(store,relative,bytes,128u*1024u*1024u,error);
-    if(!ok)return nullptr;
+    std::string local_err;
+    std::string* err_out = error ? error : &local_err;
+    bool ok=inflate_sz?
+        retail_asset_read_relative_inflated(store,relative,bytes,128u*1024u*1024u,err_out):
+        retail_asset_read_relative(store,relative,bytes,128u*1024u*1024u,err_out);
+    if(!ok&&!inflate_sz&&*err_out!="retail file missing"){
+        std::string err_sz;
+        if(retail_asset_read_relative_inflated(store,relative,bytes,128u*1024u*1024u,&err_sz)){
+            ok=true;
+        }
+    }
+    VITA_LOG("[TRACK_LOAD] Requesting track file: %s (result: %s)\n",
+             relative.c_str(), ok ? "OK" : "MISSING");
+    if(!ok){
+        VITA_LOG("[retail_asset] Guest file '%s' not found on disk, providing empty fallback stub: %s\n",
+                 relative.c_str(), err_out->c_str());
+        bytes.resize(16,0);
+        return &store.path_cache.emplace(cache_key,std::move(bytes)).first->second;
+    }
+#if defined(__VITA__) || defined(__psp2__)
+    if(inflate_sz&&store.path_cache.size()>=16u){
+        for(auto it=store.path_cache.begin();it!=store.path_cache.end();){
+            if(it->first.rfind("I:",0)==0)it=store.path_cache.erase(it);
+            else ++it;
+        }
+    }
+#endif
     return &store.path_cache.emplace(cache_key,std::move(bytes)).first->second;
 }
 

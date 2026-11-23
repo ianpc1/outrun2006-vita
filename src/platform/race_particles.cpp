@@ -78,6 +78,9 @@ std::uint32_t particles_get_work_418420(PcParticleContext& pc,std::uint32_t id){
     const std::uint32_t source_at=source_address(id);
     auto& src=p.at<ParticleSource>(source_at);
     p.put(ParticleCurrentSource,source_at);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    if(src.live>=64u)return 0u; // shortcut: cap live particles per source at 64 on Vita to match draw cap, raise if CPU budget allows
+#endif
     if(src.free_list){
         if(src.free_count<=0)return 0;
         --src.free_count;
@@ -182,7 +185,13 @@ void particles_control_41bc60(PcParticleContext& pc){
     glow_colour_4160f0(p);
     for(std::uint32_t id=0;id<ParticleSourceCount;++id){
         const auto& src=source(p,id);
-        if(src.state<0)particles_source_ctrl_418540(pc,src.buffer,source_address(id));
+        if(src.state<0){
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            const std::uint32_t fn=p.u(0x74e99cu+(std::uint32_t(src.state)&7u)*4u);
+            if(fn==0x41a6f0u||fn==0x41ae40u)continue; // point sprites are dropped by VitaGlD3D9Device
+#endif
+            particles_source_ctrl_418540(pc,src.buffer,source_address(id));
+        }
     }
 }
 }

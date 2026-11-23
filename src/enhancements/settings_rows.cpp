@@ -30,13 +30,20 @@ Rows& rows(){static Rows r;return r;}
 
 std::vector<Option> available(const VideoBackend& b){
     std::vector<Option> o;
+#if !defined(OR2_VITA) && !defined(__VITA__) && !defined(__psp2__)
     if(b.widescreen_available())o.push_back(Option::Aspect);
     if(b.heights().size()>1)o.push_back(Option::Resolution);
     if(b.antialiasing_modes().size()>1)o.push_back(Option::Antialiasing);
+#endif
     if(b.frame_rates().size()>1)o.push_back(Option::FrameRate);
     return o;
 }
-const char* label(Option o){return o==Option::Aspect?"ASPECT RATIO":o==Option::Resolution?"RESOLUTION":o==Option::FrameRate?"FRAME RATE":"ANTI-ALIASING";}
+const char* label(Option o){
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    if(o==Option::FrameRate)return "MENU FRAME RATE";
+#endif
+    return o==Option::Aspect?"ASPECT RATIO":o==Option::Resolution?"RESOLUTION":o==Option::FrameRate?"FRAME RATE":"ANTI-ALIASING";
+}
 // The choices of a row and the index of the edited value among them.
 std::vector<std::string> choices(const VideoBackend& b,const VideoSettings& s,Option o,int& index){
     std::vector<std::string> out;index=0;

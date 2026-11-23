@@ -334,6 +334,7 @@ std::uint32_t translated_call_list(PcRaceMemory& m,const PcRaceService& service,
         PcRaceCall k{};k.pc=target;k.eax=c.eax;k.ecx=c.ecx;k.argc=std::uint32_t(k.args.size());
         for(unsigned i=0;i<k.args.size();++i)k.args[i]=translated_arg(c,i);
         const std::uint32_t eax=(*s.service)(k);
+        if(target==0x4af500u)c.fpu.push(or2x86::x87_from_f32(eax));
         if(s.module->matrices)matrices_out(s);
         translated_return(c,eax,pops(*s.module,target));
     };

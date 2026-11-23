@@ -4,6 +4,8 @@
 #include <functional>
 #include <vector>
 namespace outrun::platform {
+extern std::int32_t g_lod_culling_distance;
+extern std::int32_t g_lod_bias_offset;
 // A loaded PMT bank (PC 7C2800 + id*0x48). The PC loader 42E4F0 relocates
 // the 0x3C-byte object records by adding the system base to fields +04..+38;
 // natively those fields stay system-section offsets. Objects start at +0x18.

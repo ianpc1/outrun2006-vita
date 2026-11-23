@@ -21,6 +21,38 @@ void put32(std::uint8_t* p,std::uint32_t v){std::memcpy(p,&v,4);}
 // PC memory the ported events may touch, over the runtime-owned bytes.
 void map_memory(NativeRuntimeContext& c,PcRaceMemory& m,bool particles){
     auto& s=c.race_effects;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    // Structural fast-path: keep s.memory + 64-entry TLB warm across 4AFDC0, 41BC60, 41BD10, 4208A0, 420560.
+    particles = true;
+    const auto& area_regs = native_race_area_memory(c, nullptr, false).regions();
+    auto& world = c.start_mode.scene_owner_course_world;
+    std::uint64_t esig = std::uint64_t(area_regs.size())
+        ^ (c.race_end ? 0x10000ull : 0ull)
+        ^ (s.bank57_failed ? 0x20000ull : 0ull)
+        ^ (std::uint64_t(c.mode_state.current == 24u) << 18u);
+    for (std::uint32_t k = 0; k < 4u; ++k) if (world.lane_loaded(k)) esig ^= (1ull << (k + 8u));
+    esig ^= reinterpret_cast<std::uintptr_t>(area_regs.empty() ? nullptr : area_regs.back().data);
+    esig ^= reinterpret_cast<std::uintptr_t>(s.lights_899b98);
+    esig ^= reinterpret_cast<std::uintptr_t>(s.glow_8a8c18);
+    esig ^= reinterpret_cast<std::uintptr_t>(&s);
+    static std::uint64_t s_last_fx_sig = 0;
+    if (esig == s_last_fx_sig && !m.regions().empty()) {
+        s.scene.work_pointer_79f5ec = c.event_state.slots[387].work_token;
+        for (std::uint32_t id = 0; id < s.event_flags_79fb48.size(); ++id) s.event_flags_79fb48[id] = c.event_state.slots[id].flags;
+        put32(s.mode_78024c.data() + 0xc, c.game_mode.game_variant);
+        put32(s.mode_78024c.data() + 0x20, c.mode_state.current);
+        put32(s.frame_95af0c.data(), c.frame_state.frame_counter_95af0c);
+        const auto& o = c.race.camera_override; auto* b = s.override_82e7c0.data();
+        std::memcpy(b + 0x00, &o.w82e7c0, 4); std::memcpy(b + 0x04, &o.w82e7c4, 2);
+        std::memcpy(b + 0x08, &o.w82e7c8, 4); std::memcpy(b + 0x0c, &o.w82e7cc, 2);
+        std::memcpy(b + 0x10, &o.w82e7d0, 4); b[0x14] = o.scene_82e7d4;
+        std::memcpy(b + 0x18, &o.override_82e7d8, 4); std::memcpy(b + 0x1c, &o.w82e7dc, 2);
+        std::memcpy(b + 0x20, &o.time_82e7e0, 4); std::memcpy(b + 0x24, &o.w82e7e4, 4);
+        std::memcpy(b + 0x28, &o.f82e7e8, 4);
+        return;
+    }
+    s_last_fx_sig = esig;
+#endif
     m.clear();
     // The AREA owner's PC memory (area block 7D2D80.., course records, the
     // race-manager block, EXE tables) as its last callback built it; the

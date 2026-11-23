@@ -32,14 +32,40 @@ struct RobotMissing : std::runtime_error {
 void put(std::array<std::uint8_t,4>& cell,std::uint32_t v){std::memcpy(cell.data(),&v,4);}
 // Maps the runtime-owned state (see race_robots_runtime.hpp) for one call.
 bool map_memory(NativeRuntimeContext& c,NativeRaceRobots& r,bool scene=false){
-    auto& m=r.memory;m.clear();
+    auto& m=r.memory;
+    const auto& slots=c.event_state.slots;
+    const std::uint32_t car=slots[8].work_token,camera=slots[385].work_token;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    // Structural fast-path: keep r.memory + 64-entry TLB warm across 488DD0, 4879B0, 4879D0.
+    std::uint64_t rsig = (std::uint64_t(car) << 1) ^ (std::uint64_t(camera) << 17)
+        ^ (std::uint64_t(r.chr_heaps.size()) << 33) ^ (std::uint64_t(r.autoscene_files.size()) << 41)
+        ^ (r.disp_constructed ? 0x1000000000000ull : 0ull)
+        ^ (scene ? 0x2000000000000ull : 0ull)
+        ^ reinterpret_cast<std::uintptr_t>(r.renderer)
+        ^ reinterpret_cast<std::uintptr_t>(&r);
+    static std::uint64_t s_last_rob_sig = 0;
+    if (rsig == s_last_rob_sig && !m.regions().empty()) {
+        put(r.cell_799d18, car); put(r.cell_79f010, slots[362].work_token);
+        put(r.cell_79f574, camera); put(r.cell_7f94c0, 0);
+        put(r.cell_78024c, c.start_mode.course_preset);
+        put(r.cell_780258, c.game_mode.game_variant);
+        put(r.cell_78026c, c.mode_state.current);
+        for (std::size_t i = 0; i < r.flags_79fb48.size(); ++i) r.flags_79fb48[i] = slots[i].flags;
+        const float step = c.race.clock.step_842114;
+        std::memcpy(r.cell_842114.data(), &step, 4);
+        put(r.cell_799ca0, slots[6].work_token);
+        for (std::uint32_t i = 0; i < r.cell_records_799b38.size(); ++i)
+            put(r.cell_records_799b38[i], slots[0x16au + i].work_token);
+        return true;
+    }
+    s_last_rob_sig = rsig;
+#endif
+    m.clear();
     // The EXE tables (AUTOSCENE script rows 717D68, paths, names; the passenger's
     // translated code reads its .rdata/.data tables directly), shadowed below.
     (void)scene;for(std::size_t i=0;i<EmbeddedExeRangeCount;++i)m.map_const(EmbeddedExeRanges[i].base,EmbeddedExeRanges[i].data,EmbeddedExeRanges[i].size);
     auto& s=c.event_function36.car_select;
-    const auto& slots=c.event_state.slots;
     r.state.map(m);race_robots_map_tables(m);
-    const std::uint32_t car=slots[8].work_token,camera=slots[385].work_token;
     put(r.cell_799d18,car);put(r.cell_79f010,slots[362].work_token);put(r.cell_79f574,camera);put(r.cell_7f94c0,0);
     put(r.cell_78024c,c.start_mode.course_preset);put(r.cell_780258,c.game_mode.game_variant);put(r.cell_78026c,c.mode_state.current);
     for(std::size_t i=0;i<r.flags_79fb48.size();++i)r.flags_79fb48[i]=slots[i].flags;

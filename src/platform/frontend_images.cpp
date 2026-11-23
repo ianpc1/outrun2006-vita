@@ -73,7 +73,11 @@ bool frontend_image_quad(const FrontendListImage& image,const FrontendImageBank&
     if(!std::isfinite(xr)||!std::isfinite(yb))return false;
     const auto& t=bank.textures[texture];if(!t.width||!t.height)return false;
     const float half_u=.51f/t.width,half_v=.51f/t.height;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    constexpr float hy = 1.0f, hx = 1.0f;
+#else
     constexpr float hy=.9f,hx=.9f*(640.f/480.f)/(1280.f/720.f);
+#endif
     for(unsigned i=0;i<4;++i){const bool r=i==1||i==2,b=i>=2;auto& v=out[i];
         v.position={{-hx+(r?xr:x)*(2*hx/640),hy-(b?yb:y)*(2*hy/480),0}};
         v.normal={{.401422f,.752666f,.521849f}};v.uv={{r?ul-half_u:ur+half_u,b?vb+half_v:vt-half_v}};

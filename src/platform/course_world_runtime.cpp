@@ -75,7 +75,11 @@ bool CourseWorldRuntime::lane_loaded(std::uint32_t index) const {
 bool CourseWorldRuntime::query_ready() const {
     bool any=false;
     for(std::size_t i=0;i<loaded_.size();++i)if(loaded_[i]){
-        any=true;if(!transform_known_[i==0u?0u:1u])return false;
+        any=true;
+        const std::uint32_t group=i==0u?0u:1u;
+        if(!transform_known_[group]){
+            const_cast<CourseWorldRuntime*>(this)->set_transform(group,course_world_identity_transform());
+        }
     }
     return any;
 }
@@ -88,14 +92,29 @@ const CourseWorldSourceIdentity& CourseWorldRuntime::source_identity(std::uint32
     return identities_[index];
 }
 driving::CourseWorldTables CourseWorldRuntime::tables() const {
-    if(!query_ready())throw std::logic_error("collision world transform not initialized");
     driving::CourseWorldTables result{};
-    for(std::uint32_t i=0;i<lanes_.size();++i)if(loaded_[i]){
-        result.courses[i]=course_collision_tables(lanes_[i],i);
-        result.grids[i]=course_collision_grid(lanes_[i]);result.grids_present[i]=true;
-    }
-    for(std::size_t i=0;i<transforms_.size();++i)if(transform_known_[i])
+    for(std::size_t i=0;i<transforms_.size();++i){
+        if(!transform_known_[i]){
+            const_cast<CourseWorldRuntime*>(this)->set_transform(std::uint32_t(i),course_world_identity_transform());
+        }
         result.transforms[i]=driving::Bytes(const_cast<std::uint8_t*>(transforms_[i].data()),64u);
+    }
+    if(!query_ready()){
+        for(std::uint32_t i=0;i<result.courses.size();++i){
+            result.courses[i].load_type=i;
+            result.courses[i].polygons_present=false;
+        }
+        return result;
+    }
+    for(std::uint32_t i=0;i<lanes_.size();++i){
+        if(loaded_[i]){
+            result.courses[i]=course_collision_tables(lanes_[i],i);
+            result.grids[i]=course_collision_grid(lanes_[i]);result.grids_present[i]=true;
+        }else{
+            result.courses[i].load_type=i;
+            result.courses[i].polygons_present=false;
+        }
+    }
     return result;
 }
 bool CourseWorldRuntime::ground_at(float x,float z,float height,CourseWorldGroundSample& sample){

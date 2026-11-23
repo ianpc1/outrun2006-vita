@@ -1,6 +1,9 @@
 #include <cstring>
 #include "driving/pc_x87.hpp"
 namespace outrun::driving {
+#if OR2_X87_VITA
+static_assert(sizeof(X87) == 4, "X87 no esta usando float!");
+#endif
 X87Precision& x87_precision(){static X87Precision p=X87Precision::Single24;return p;}
 long double x87_round_bits(long double v,int bits){
     if(v==0.0L||!std::isfinite(v))return v;
@@ -44,7 +47,9 @@ double resolve(double hi,double err){
     double out;std::memcpy(&out,&r,8);return out;
 }
 }
+#if !OR2_X87_VITA
 bool x87_set_control(std::uint16_t cw){return ((cw>>8)&3u)==0u;}
+#endif
 #else
 #if defined(__i386__) || defined(__x86_64__)
 std::uint16_t x87_control_word(){
@@ -84,6 +89,7 @@ namespace {
 // rare large-argument path; |x| >= 2^63 leaves ST0 unchanged (C2=1).
 constexpr std::uint64_t kPi66Hi=0x3ull;                     // pi66/2 = (kPi66Hi:kPi66Lo) * 2^-65,
 constexpr std::uint64_t kPi66Lo=0x243F6A8885A308D3ull;      // 0x3243F6A8885A308D3 = 0xC90FDAA22168C234C/4
+#if defined(__SIZEOF_INT128__)
 bool x87_reduce_large(double x,unsigned& quadrant,double& r_hi,double& r_lo){
     using u128=unsigned __int128;
     const u128 P=(u128(kPi66Hi)<<64)|kPi66Lo;
@@ -101,6 +107,11 @@ bool x87_reduce_large(double x,unsigned& quadrant,double& r_hi,double& r_lo){
     if(x<0){r_hi=-r_hi;r_lo=-r_lo;q=(4u-q)&3u;}
     quadrant=q;return true;
 }
+#else
+bool x87_reduce_large(double,unsigned&,double&,double&){
+    return false;
+}
+#endif
 double x87_sin_large(double x,bool cosine){
     unsigned q=0;double rh=0,rl=0;
     if(!x87_reduce_large(x,q,rh,rl))return cosine?std::cos(x):std::sin(x);
@@ -110,6 +121,7 @@ double x87_sin_large(double x,bool cosine){
 }
 constexpr double kLargeTrig=256.0;   // below this the pi66 reduction error is < 2^-58
 }
+#if !OR2_X87_VITA
 X87 x87_sin(X87 a){const double x=double(a.v);const double ax=std::fabs(x);
     if(OR2_X87_LIKELY(ax<kLargeTrig))return X87(x87_value_t(std::sin(x)));
     if(!(ax<0x1p63))return a;                                // out of range: ST0 unchanged
@@ -120,5 +132,6 @@ X87 x87_cos(X87 a){const double x=double(a.v);const double ax=std::fabs(x);
     return X87(x87_value_t(x87_sin_large(x,true)));}
 X87 x87_tan(X87 a){return X87(x87_value_t(std::tan(double(a.v))));}
 X87 x87_atan2(X87 y,X87 x){return X87(x87_value_t(std::atan2(double(y.v),double(x.v))));}
+#endif
 #endif
 }

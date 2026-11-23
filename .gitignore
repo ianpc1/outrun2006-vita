@@ -1,6 +1,7 @@
 # Build outputs
 build/
 build-*/
+vita/build/
 deliver/
 release/
 bin/
@@ -8,6 +9,11 @@ obj/
 *.o
 *.a
 *.elf
+*.velf
+*.vpk
+*.self
+eboot.bin
+param.sfo
 *.nro
 *.nso
 *.nacp

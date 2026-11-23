@@ -11,6 +11,9 @@
 #include <initializer_list>
 #include <limits>
 #include "driving/service_hole.hpp"
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 namespace outrun::driving {
 namespace {
 constexpr float kOne=1.0f;
@@ -2734,8 +2737,16 @@ void event_control_43fab0(PcEventControlState& state,const PcEventServices& serv
             event_invoke(services,slot,slot.init_callback);
             slot.flags=static_cast<std::uint8_t>((slot.flags&~0x01u)|0x02u);
         }
-        if((slot.flags&0x18u)==0u&&(slot.flags&0x02u)!=0u)
+        if((slot.flags&0x18u)==0u&&(slot.flags&0x02u)!=0u){
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            const bool cap = outrun::vita_profile::g_capture_display_cb;
+            const SceUInt64 lt0 = cap ? sceKernelGetProcessTimeWide() : 0;
+#endif
             event_invoke(services,slot,slot.ctrl_callback);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            if (cap) outrun::vita_profile::cb_accum('L', slot.ctrl_callback, static_cast<std::uint32_t>(sceKernelGetProcessTimeWide() - lt0));
+#endif
+        }
     }
 }
 
@@ -5898,6 +5909,9 @@ std::uint32_t runtime_platform_init_417740(
     return 1u;
 }
 
+std::uint32_t g_max_simulation_ticks = 1;
+bool g_is_final_sim_tick = true;
+
 std::uint32_t runtime_frame_ticks_417890(
     PcRuntimeTimingState417890& state,
     std::int32_t target_rate,
@@ -5920,6 +5934,11 @@ std::uint32_t runtime_frame_ticks_417890(
     const auto consumed=wrap_mul(frames,state.frequency_8a8c98)/static_cast<std::int64_t>(target_rate);
     state.accumulator_8a8cd0=wrap_sub(state.accumulator_8a8cd0,consumed);
     if(state.gate_8a8cc8==0u){state.accumulator_8a8cd0=0;return 1u;}
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+    if(frames > g_max_simulation_ticks){state.accumulator_8a8cd0=0;return g_max_simulation_ticks;}
+#else
+    if(frames>4){state.accumulator_8a8cd0=0;return 4u;}
+#endif
     return static_cast<std::uint32_t>(frames);
 }
 
@@ -5934,16 +5953,17 @@ PcRuntimeFrameResult417c7b runtime_frame_step_417c7b(
     std::uint32_t quantized=1u;
     if(services.timing_state&&services.timing_services)
         quantized=runtime_frame_ticks_417890(*services.timing_state,60,*services.timing_services);
-    // Port enhancement: above 60 Hz the menu / loading modes also keep 60 Hz
-    // ticks (the PC runs them once per frame, faster on a faster display).
+    // Port enhancement: maintain 60 Hz simulation ticks across all modes,
+    // including menus and loading screens, even when running at 30 Hz (quantized=2).
     const bool display_only=services.ticks&&services.ticks->display_frames;
-    const bool force_one=cooperative>1u||(!display_only&&(state.mode_78026c==0x20u||state.mode_78026c==0x24u||state.mode_78026c==0x18u));
+    const bool force_one=cooperative>1u;
     state.updates_95af48=(force_one||(quantized==0u&&!display_only))?1u:quantized;
     call(0x43fa10u,{state.updates_95af48});
     state.update_index_8a8cdc=0u;
     if(static_cast<std::int32_t>(state.updates_95af48)>0){
         while(static_cast<std::int32_t>(state.update_index_8a8cdc) <
               static_cast<std::int32_t>(state.updates_95af48)){
+            g_is_final_sim_tick = (state.update_index_8a8cdc + 1u >= state.updates_95af48);
             if(services.ticks&&services.ticks->before_tick)services.ticks->before_tick();
             call(0x453bb0u);
             call(0x42f330u);
@@ -5955,6 +5975,7 @@ PcRuntimeFrameResult417c7b runtime_frame_step_417c7b(
             ++state.update_index_8a8cdc;
         }
     }
+    g_is_final_sim_tick = true;
     state.update_index_8a8cdc=0u;
     if(services.ticks&&services.ticks->after_ticks)services.ticks->after_ticks(services.timing_state,state.updates_95af48);
     call(0x454670u);

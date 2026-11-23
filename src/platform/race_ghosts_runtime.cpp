@@ -360,23 +360,60 @@ bool native_ghost_car_display(NativeRuntimeContext& c,PcSceneRenderer& r,std::ui
     if(callback!=0x4ae5f0u&&callback!=0x4adac0u)return false;
     // the car works of events 9..31 (TA ghost cars 9..12, traffic / racer cars 9..31)
     if(work<NativeGhostRuntime::CarBase||work>=NativeGhostRuntime::CarBase+23u*0x10f0u||(work-NativeGhostRuntime::CarBase)%0x10f0u)return false;
+
+    // Fast Frustum Culling: discard off-screen traffic and ghost cars before matrix/draw generation
+    {
+        const driving::Bytes gc(c.race.manager.car_works_7815a0.data() + (work - NativeGhostRuntime::CarBase), 0x10f0);
+        const auto& view = r.queue_context().view;
+        const auto& f = view.frustum_95bf40;
+        if (f[4] > 0.01f && f[5] > f[4]) {
+            const float* vm = reinterpret_cast<const float*>(view.view_95d860.data());
+            const float cx = gc.f32(0x14), cy = gc.f32(0x18), cz = gc.f32(0x1c);
+            const float vx = cx * vm[0] + cy * vm[4] + cz * vm[8]  + vm[12];
+            const float vy = cx * vm[1] + cy * vm[5] + cz * vm[9]  + vm[13];
+            const float vz = cx * vm[2] + cy * vm[6] + cz * vm[10] + vm[14];
+
+            constexpr float car_radius = 5.5f;
+            const auto& p = view.planes_95bf58;
+            if ((vz - car_radius) > -f[4]) return true;              // behind camera / near plane
+            if ((p[1][2] * vz + p[1][0] * vx) > car_radius) return true; // right plane
+            if ((p[0][2] * vz + p[0][0] * vx) > car_radius) return true; // left plane
+            if ((p[2][1] * vy + p[2][2] * vz) > car_radius) return true; // bottom plane
+            if ((p[3][1] * vy + p[3][2] * vz) > car_radius) return true; // top plane
+            if ((car_radius + vz) < -f[5]) return true;              // far plane
+        }
+    }
+
     auto& g=native_race_ghosts(c);
     auto& matrices=r.matrices();
     const auto depth=matrices.depth;
     g.draw_list.clear();
     try{
-        PcRaceMemory m;g.map(m);ghost_map_car_tables(m);
-        auto& works=c.race.manager.car_works_7815a0;m.map(NativeGhostRuntime::CarBase,works.data(),23u*0x10f0u);
-        std::uint32_t variant=c.game_mode.game_variant,mode=c.mode_state.current,player_ptr=0x7804b0u,net=c.start_mode.manager_state_7f94c0;
-        m.map(0x780258u,reinterpret_cast<std::uint8_t*>(&variant),4);m.map(0x78026cu,reinterpret_cast<std::uint8_t*>(&mode),4);
-        m.map(0x7f94c0u,reinterpret_cast<std::uint8_t*>(&net),4);
+        auto& m=g.display_memory;
+        auto& works=c.race.manager.car_works_7815a0;
         auto& player=c.event_function36.car_select.car_799d18;
-        m.map(0x799d18u,reinterpret_cast<std::uint8_t*>(&player_ptr),4);m.map(0x7804b0u,player.data(),0x10f0u);
+        auto& active=c.event_function36.frontend_profiles.active;
+        g.display_mirrors[0]=c.game_mode.game_variant;g.display_mirrors[1]=c.mode_state.current;
+        g.display_mirrors[2]=0x7804b0u;g.display_mirrors[3]=c.start_mode.manager_state_7f94c0;
+        for(std::size_t i=0;i<g.display_flags.size();++i)g.display_flags[i]=std::uint8_t(c.event_state.slots[i].flags);
+        // Every region below is mapped by pointer (values refreshed above): remap only when a pointer or the heap changes.
+        const std::uintptr_t sig=reinterpret_cast<std::uintptr_t>(works.data())^(reinterpret_cast<std::uintptr_t>(player.data())<<1)
+            ^(reinterpret_cast<std::uintptr_t>(active.data())<<2)^(std::uintptr_t(g.heap.size())<<20)^std::uintptr_t(g.next_block)
+            ^(reinterpret_cast<std::uintptr_t>(&g)<<3);
+        static std::uintptr_t s_ghost_sig=0;
+        if(sig!=s_ghost_sig||m.regions().empty()){
+        s_ghost_sig=sig;
+        m.clear();g.map(m);ghost_map_car_tables(m);
+        m.map(NativeGhostRuntime::CarBase,works.data(),23u*0x10f0u);
+        m.map(0x780258u,reinterpret_cast<std::uint8_t*>(&g.display_mirrors[0]),4);
+        m.map(0x78026cu,reinterpret_cast<std::uint8_t*>(&g.display_mirrors[1]),4);
+        m.map(0x7f94c0u,reinterpret_cast<std::uint8_t*>(&g.display_mirrors[3]),4);
+        m.map(0x799d18u,reinterpret_cast<std::uint8_t*>(&g.display_mirrors[2]),4);m.map(0x7804b0u,player.data(),0x10f0u);
         m.map(RaceManagerState::base,reinterpret_cast<std::uint8_t*>(&c.race.manager.state),sizeof(RaceManagerState));   // 7D39F0 (44FF10)
-        m.map(0x7c23e0u,c.event_function36.frontend_profiles.active.data(),c.event_function36.frontend_profiles.active.size());   // 7C24C9 option byte
-        std::array<std::uint8_t,0x200> flags{};for(std::size_t i=0;i<flags.size();++i)flags[i]=std::uint8_t(c.event_state.slots[i].flags);
-        m.map(0x79fb48u,flags.data(),flags.size());
+        m.map(0x7c23e0u,active.data(),active.size());   // 7C24C9 option byte
+        m.map(0x79fb48u,g.display_flags.data(),g.display_flags.size());
         m.map(0x842038u,g.alpha_842038.data(),g.alpha_842038.size());
+        }
         PcRaceContext ctx{m,matrices,[&](const PcRaceCall& k)->std::uint32_t{
             if(k.pc==0x4957f0u)return c.start_mode.selection_active_836374?1u:0u;
             // the selected Races record [83637C] (mission manager)
@@ -401,17 +438,16 @@ bool native_ghost_car_display(NativeRuntimeContext& c,PcSceneRenderer& r,std::ui
         while(matrices.depth>depth)driving::pc_matrix_pop(matrices);
         ++g.display_faults;g.display_error=e.what();g.draw_list.clear();return true;
     }
-    if(std::getenv("OR2_GHOST_TRACE")){const driving::Bytes gc(c.race.manager.car_works_7815a0.data()+(work-NativeGhostRuntime::CarBase),0x10f0);
+    static const bool ghost_trace=std::getenv("OR2_GHOST_TRACE")!=nullptr;
+    if(ghost_trace){const driving::Bytes gc(c.race.manager.car_works_7815a0.data()+(work-NativeGhostRuntime::CarBase),0x10f0);
         const driving::Bytes pl(c.event_function36.car_select.car_799d18.data(),c.event_function36.car_select.car_799d18.size());
         std::fprintf(stderr,"[ghost] pos=(%.2f,%.2f,%.2f) m=(%.2f,%.2f,%.2f) player=(%.2f,%.2f,%.2f) lod=%d model=%d\n",gc.f32(0x14),gc.f32(0x18),gc.f32(0x1c),
-            gc.f32(0xb0+0x30),gc.f32(0xb0+0x34),gc.f32(0xb0+0x38),pl.f32(0x14),pl.f32(0x18),pl.f32(0x1c),int(gc.i8(0x328)),int(gc.i8(0x11)));}
-    if(std::getenv("OR2_GHOST_TRACE"))std::fprintf(stderr,"[ghost] %s work=%x draws=%zu flags4=%x c5c=%x b68=%f\n",callback==0x4ae5f0u?"disp":"shadow",work,g.draw_list.size(),
-        driving::Bytes(c.race.manager.car_works_7815a0.data()+(work-NativeGhostRuntime::CarBase),0x10f0).u32(4),
-        driving::Bytes(c.race.manager.car_works_7815a0.data()+(work-NativeGhostRuntime::CarBase),0x10f0).u32(0xc5c),
-        double(driving::Bytes(c.race.manager.car_works_7815a0.data()+(work-NativeGhostRuntime::CarBase),0x10f0).f32(0xb68)));
+            gc.f32(0xb0+0x30),gc.f32(0xb0+0x34),gc.f32(0xb0+0x38),pl.f32(0x14),pl.f32(0x18),pl.f32(0x1c),int(gc.i8(0x328)),int(gc.i8(0x11)));
+        std::fprintf(stderr,"[ghost] %s work=%x draws=%zu flags4=%x c5c=%x b68=%f\n",callback==0x4ae5f0u?"disp":"shadow",work,g.draw_list.size(),
+            gc.u32(4),gc.u32(0xc5c),double(gc.f32(0xb68)));}
     try{g.objects_drawn+=native_race_draw_list_execute(c,r,g.draw_list);}
     catch(const std::exception& e){++g.display_faults;g.display_error=std::string("draw list: ")+e.what();}
-    if(std::getenv("OR2_GHOST_TRACE")){auto& o=native_race_area(c);std::fprintf(stderr,"[ghost]   skipped=%u bank_failures=%u first=%x last=%s\n",o.skipped_objects,o.bank_failures,
+    if(ghost_trace){auto& o=native_race_area(c);std::fprintf(stderr,"[ghost]   skipped=%u bank_failures=%u first=%x last=%s\n",o.skipped_objects,o.bank_failures,
         g.draw_list.size()>1?g.draw_list[1].args[0]:0u,o.last_error.c_str());
         for(const auto& d:g.draw_list)std::fprintf(stderr," %x(%x,%x,%x)",d.pc,d.args[0],d.args[1],d.args[2]);std::fprintf(stderr,"\n");}
     return true;

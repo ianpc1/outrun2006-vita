@@ -25,7 +25,7 @@ State& state(){static State s;return s;}
 std::uint32_t display_rate(){return state().rate;}
 void set_display_rate(std::uint32_t rate){
     auto& s=state();
-    if(rate<=60u){display_before_tick();s.replays.clear();rate=60u;}
+    if(rate<=60u){display_before_tick();s.replays.clear();}
     s.rate=rate;
 }
 bool display_frames(){return state().rate>60u;}

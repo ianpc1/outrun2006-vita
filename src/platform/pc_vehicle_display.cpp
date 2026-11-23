@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 namespace outrun::platform {
 using driving::Bytes;
 namespace {
@@ -17,7 +20,7 @@ void vehicle_draw_calls_execute(PcVehicleDisplayContext& c,const std::vector<PcV
         const auto& a=call.args;
         auto load_matrix=[&]{
             if(q.matrices.depth>=q.matrices.capacity)throw std::runtime_error("vehicle draw matrix stack");
-            for(unsigned k=0;k<64;++k)q.matrices.current().put8(k,call.matrix[k]);
+            std::memcpy(q.matrices.current().data(),call.matrix.data(),64);
         };
         switch(call.pc){
         case 0x405360u:
@@ -31,9 +34,17 @@ void vehicle_draw_calls_execute(PcVehicleDisplayContext& c,const std::vector<PcV
         case 0x4044f0u:render_pass_record_4044f0(c.flush.g,a[0],a[1],a[2],a[3],a[4]);break;
         case 0x404540u:render_pass_defaults_404540(c.flush.g,c.layer_7d25f0);break;
         case 0x4052b0u:render_queue_mode_4052b0(q);break;
-        case 0x4052c0u:render_queue_flush_4052c0(c.flush,q);break;
+        case 0x4052c0u:{
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            outrun::vita_profile::FlushScope fs;
+#endif
+            render_queue_flush_4052c0(c.flush,q);break;}
         case 0x405350u:{
-            std::vector<std::uint32_t> order(q.opaque.count);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            outrun::vita_profile::FlushScope fs;
+#endif
+            static std::vector<std::uint32_t> order;
+            order.resize(q.opaque.count);
             for(std::uint32_t k=0;k<q.opaque.count;++k)order[k]=k;
             render_queue_flush_405890(c.flush,q.opaque,order);break;}
         case 0x422550u:case 0x422740u:
@@ -46,6 +57,13 @@ void vehicle_draw_calls_execute(PcVehicleDisplayContext& c,const std::vector<PcV
     }
 }
 void vehicle_display_46c140(PcVehicleDisplayContext& c,Bytes car){
+    const bool is_player = (car.size() > 0x5c && car.u32(0x5c) == 0);
+    if (!is_player && car.size() >= 0x20) {
+        const float cx = car.f32(0x14), cy = car.f32(0x18), cz = car.f32(0x1c);
+        const float* vm = reinterpret_cast<const float*>(c.queue.view.view_95d860.data());
+        const float vz = cx * vm[2] + cy * vm[6] + cz * vm[10] + vm[14];
+        if (vz > 6.0f) return; // Culled: behind camera
+    }
     Bytes sun=c.environment.lights_899b98.sub(0x899cd8u-0x899b98u,0xa0);
     std::array<std::uint8_t,16> saved{};
     for(unsigned k=0;k<16;++k)saved[k]=sun.u8(8+k);
@@ -70,6 +88,13 @@ driving::X87 x87_sin(float v){return driving::x87_sin(driving::X87(v));} // 4493
 }
 void vehicle_race_display_46bd30(PcVehicleDisplayContext& c,PcRaceCarDisplayState& st,const PcRaceCarDisplayInputs& in,
     Bytes car,const std::function<void(std::uint32_t)>& unported){
+    const bool is_player = (car.size() > 0x5c && car.u32(0x5c) == 0);
+    if (!is_player && car.size() >= 0x20) {
+        const float cx = car.f32(0x14), cy = car.f32(0x18), cz = car.f32(0x1c);
+        const float* vm = reinterpret_cast<const float*>(c.queue.view.view_95d860.data());
+        const float vz = cx * vm[2] + cy * vm[6] + cz * vm[10] + vm[14];
+        if (vz > 6.0f) return; // Culled: behind camera
+    }
     Bytes sun=c.environment.lights_899b98.sub(0x899cd8u-0x899b98u,0xa0);
     const float brightness=car.f32(0x58);
     for(unsigned k=0;k<16;++k)st.diffuse_7f944c[k]=sun.u8(8+k);

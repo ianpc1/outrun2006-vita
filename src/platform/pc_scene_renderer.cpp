@@ -13,6 +13,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <stdexcept>
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 namespace outrun::platform {
 using driving::Bytes;
 PcSceneRenderer::PcSceneRenderer(PcD3D9Device& device):device_(device),matrix_arena_(64u*64u),
@@ -22,10 +25,14 @@ PcSceneRenderer::PcSceneRenderer(PcD3D9Device& device):device_(device),matrix_ar
         pc_colour_list_alt_408c80,1});
     driving::pc_matrix_identity(matrices_);
     queue_=std::make_unique<PcRenderContext>(PcRenderContext{opaque_,alpha_,view_,matrices_,
-        [this](std::uint32_t r)->const PcModelBank*{auto it=owned_banks_.find(r);return it==owned_banks_.end()?nullptr:&it->second->model;},7});
+        [this](std::uint32_t r)->const PcModelBank*{auto it=owned_banks_.find(r);return it==owned_banks_.end()?nullptr:&it->second->model;},g_lod_culling_distance});
     camera_live_fe8_.resize(0x64c);camera_live_bb0_.resize(0x438);camera_live_750_.resize(0x5460);
     queue_->immediate_8999b0=1;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    queue_->flush_4052c0=[this]{outrun::vita_profile::FlushScope fs;render_queue_flush_4052c0(*flush_,*queue_);};
+#else
     queue_->flush_4052c0=[this]{render_queue_flush_4052c0(*flush_,*queue_);};
+#endif
     // 40E4B0 -> 404250 once the device exists (render/stage defaults, 40F6B0,
     // 405160, fixed pixel shaders, normalisation cube map, shadow targets).
     renderer_init_gaps=renderer_init_404250(*flush_,*queue_,frame_.layer_7d25f0);
@@ -36,7 +43,11 @@ PcSceneRenderer::~PcSceneRenderer(){
 }
 void PcSceneRenderer::flush_alpha(){
     OR2_PERF_ZONE("405830 alpha flush");
-    std::vector<std::uint32_t> order(alpha_.count);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    outrun::vita_profile::FlushScope fs;
+#endif
+    static std::vector<std::uint32_t> order;
+    order.resize(alpha_.count);
     for(std::uint32_t k=0;k<alpha_.count;++k)order[k]=k;
     if(alpha_.count){OR2_PERF_ZONE("4499E0 alpha sort");render_queue_sort_4499e0(alpha_,order,0,std::int32_t(alpha_.count)-1);}
     render_queue_flush_405890(*flush_,alpha_,order);
@@ -108,6 +119,13 @@ bool PcSceneRenderer::load_bank(std::uint32_t resource,std::vector<std::uint8_t>
 }
 void PcSceneRenderer::install_bank(std::uint32_t resource,std::unique_ptr<Bank> bank){
     auto& r=bank->resources;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    if(resource!=0x57u){
+        r.video=nullptr;
+        r.video_size=0;
+        std::vector<std::uint8_t>().swap(bank->pmt);
+    }
+#endif
     bank->model=PcModelBank{resource,r.view(),r.object_count_0c};
     banks_[resource]=&bank->resources;
     owned_banks_[resource]=std::move(bank);
@@ -215,7 +233,9 @@ bool PcSceneRenderer::invoke(std::uint32_t callback,std::uint32_t,std::uint32_t,
             std::memcpy(&blend.owner_mode_799ca0_1c,autoscene_work_799ca0+0x1c,4);}
         driving::PcCameraDevice d;
         if(callback==0x484ee0u){
-            driving::camera_init_484ee0(camera,matrices_,d,screen_,blend,0,tables);++camera_inits;
+            const auto d0=matrices_.depth;const auto o0=matrices_.current_offset;
+            try{driving::camera_init_484ee0(camera,matrices_,d,screen_,blend,0,tables);++camera_inits;}
+            catch(const std::exception& e){matrices_.depth=d0;matrices_.current_offset=o0;++camera_unanswered;last_error=std::string("484EE0 failed: ")+e.what();return true;}
         }else{
             const std::uint8_t display=events_?events_->slots[385].flags:0u;
             driving::PcCameraControl control{pause_780248,std::int32_t(mode_78026c),camera_preset_819634,display,vehicle,
@@ -234,8 +254,10 @@ bool PcSceneRenderer::invoke(std::uint32_t callback,std::uint32_t,std::uint32_t,
             bool answered=false;
             std::vector<std::uint8_t> before;
             if(enhancements::display_frames()&&camera.size()>=0x3b4u)before.assign(camera.data(),camera.data()+0x3b4);
+            const auto d0=matrices_.depth;const auto o0=matrices_.current_offset;
             try{answered=driving::camera_control_485fe0(camera,matrices_,d,screen_,blend,control);}
             catch(const std::exception& e){
+                matrices_.depth=d0;matrices_.current_offset=o0;
                 ++camera_unanswered;last_error=std::string("485FE0 failed (view ")+std::to_string(camera.u8(0x34a))+"): "+e.what();return true;}
             if(!answered){
                 ++camera_unanswered;last_error="485FE0 debug camera or race mode without inputs: mode "+std::to_string(mode_78026c)+" (view "+std::to_string(camera.u8(0x34a))+", +94/+98/+9C "+std::to_string(camera.u32(0x94))+"/"+std::to_string(camera.u32(0x98))+"/"+std::to_string(camera.u32(0x9c))+")";return true;}
@@ -247,7 +269,11 @@ bool PcSceneRenderer::invoke(std::uint32_t callback,std::uint32_t,std::uint32_t,
         apply_camera(d,camera);
         return true;
     }
-    if(callback==0x449fc0u){pull_lists();scene_environment_init_449fc0(environment_,device_,matrices_);push_lists();++environment_inits;return true;}
+    if(callback==0x449fc0u){
+        const auto d0=matrices_.depth;const auto o0=matrices_.current_offset;
+        try{pull_lists();scene_environment_init_449fc0(environment_,device_,matrices_);push_lists();++environment_inits;}
+        catch(const std::exception& e){matrices_.depth=d0;matrices_.current_offset=o0;++environment_unanswered;last_error=e.what();}
+        return true;}
     if(callback==0x44a890u){
         PcSceneEnvironmentControl c{};c.mode_78026c=mode_78026c;c.race_mode_780258=race_mode_780258;
         // No course environment is bound to the native runtime yet: the lists
@@ -263,8 +289,9 @@ bool PcSceneRenderer::invoke(std::uint32_t callback,std::uint32_t,std::uint32_t,
         c.timer_49b2d0=[this]()->std::uint16_t{
             if(!timer_49b2d0)throw std::runtime_error("44A890 table-2 gate needs the 49B2D0 timer");
             return timer_49b2d0();};
+        const auto d0=matrices_.depth;const auto o0=matrices_.current_offset;
         try{pull_lists();scene_environment_control_44a890(environment_,c);push_lists();++environment_controls;}
-        catch(const std::runtime_error& e){++environment_unanswered;last_error=e.what();}
+        catch(const std::exception& e){matrices_.depth=d0;matrices_.current_offset=o0;++environment_unanswered;last_error=e.what();}
         return true;
     }
     return false;
@@ -499,6 +526,10 @@ void PcSceneRenderer::render_frame(driving::PcEventControlState& events,std::uin
             struct Timer{PcSceneRenderer& r;std::uint32_t pc;std::chrono::steady_clock::time_point t0;
                 ~Timer(){if(r.profile)r.profile(0u,pc,std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-t0).count()));}};
             const Timer timer{r,callback,r.profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{}};
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            outrun::vita_profile::DisplayCbScope disp_scope;
+            const SceUInt64 cb_t0 = (outrun::vita_profile::g_capture_display_cb) ? sceKernelGetProcessTimeWide() : 0;
+#endif
             try{
             if(r.race_area_display&&r.race_area_display(callback,work,event)){}   // race AREA/SKY hook (events 390/391)
             else if(callback==0x405830u)r.flush_alpha();
@@ -515,7 +546,12 @@ void PcSceneRenderer::render_frame(driving::PcEventControlState& events,std::uin
             else if(r.race_manager_display&&r.race_manager_display(callback)){} // race manager 44FE00 (event 359)
             else if(r.sprite2d_display&&r.sprite2d_display(callback)){}         // 2D sprite pool 428170
             else ++r.unported_displays[callback];
-            }catch(const std::exception& e){char t[48];std::snprintf(t,sizeof t,"display %08x: ",callback);throw std::runtime_error(t+std::string(e.what()));}},
+            }catch(const std::exception& e){char t[48];std::snprintf(t,sizeof t,"display %08x: ",callback);throw std::runtime_error(t+std::string(e.what()));}
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            if (outrun::vita_profile::g_capture_display_cb)
+                outrun::vita_profile::cb_accum('D', callback, static_cast<std::uint32_t>(sceKernelGetProcessTimeWide() - cb_t0));
+#endif
+        },
         [](void*,std::uint32_t)->std::uint32_t{throw std::runtime_error("43FB40 kind query needs the event work");},
         [](void* u){static_cast<Ctx*>(u)->self->flush_alpha();},
         [](void* u){render_lights_reset_410740(*static_cast<Ctx*>(u)->self->flush_);},
@@ -528,12 +564,23 @@ void PcSceneRenderer::render_frame(driving::PcEventControlState& events,std::uin
         if(pc==0x49f4d0u){if(!display_select_car())++unported_displays[pc];return;}   // 449050 end: the car-select car over the 2D layer
         if(pc==0x414340u&&cube_debug)std::fprintf(stderr,"[cube] frame %u depth %d offset %td\n",frames,matrices_.depth,matrices_.current_offset);
         const auto t0=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        const SceUInt64 leaf_t0 = (outrun::vita_profile::g_capture_display_cb) ? sceKernelGetProcessTimeWide() : 0;
+#endif
         if(!(leaf_hook&&leaf_hook(pc,arg)))++unported_leaves[pc];
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        if (outrun::vita_profile::g_capture_display_cb)
+            outrun::vita_profile::cb_accum('F', pc, static_cast<std::uint32_t>(sceKernelGetProcessTimeWide() - leaf_t0));
+#endif
         if(profile)profile(1u,pc,std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-t0).count()));},events,scene_,
         environment_.lights_899b98.data()+0x140,display,tables};
     sv.mode_84a318=mode_84a318;
     if(layer_callback)for(std::uint32_t k=0;k<frame_.layers.size();++k)frame_.layers[k].callback=layer_callback(k);
     frame_render_449050(*flush_,frame_,in,sv);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    if (outrun::vita_profile::g_capture_display_cb) outrun::vita_profile::cb_dump();
+    outrun::vita_profile::g_capture_display_cb = false;
+#endif
     ++frames;
 }
 }

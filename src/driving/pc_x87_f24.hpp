@@ -27,6 +27,12 @@ struct F24 {
     constexpr F24(float x):v(x){}
     constexpr F24(int x):v(float(x)){}
 };
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+inline F24 operator*(F24 a,F24 b){return F24(a.v*b.v);}
+inline F24 operator+(F24 a,F24 b){return F24(a.v+b.v);}
+inline F24 operator-(F24 a,F24 b){return F24(a.v-b.v);}
+inline F24 operator/(F24 a,F24 b){return F24(a.v/b.v);}
+#else
 inline F24 operator*(F24 a,F24 b){
     const float r=a.v*b.v;
     f24_bad|=f24_detail::special(r)|unsigned(r==0.0f&&a.v!=0.0f&&b.v!=0.0f);return F24(r);}
@@ -35,6 +41,7 @@ inline F24 operator-(F24 a,F24 b){const float r=a.v-b.v;f24_bad|=f24_detail::spe
 inline F24 operator/(F24 a,F24 b){
     const float r=a.v/b.v;
     f24_bad|=f24_detail::special(r)|unsigned(b.v==0.0f)|unsigned(r==0.0f&&a.v!=0.0f);return F24(r);}
+#endif
 inline F24 operator-(F24 a){return F24(-a.v);}
 inline bool operator==(F24 a,F24 b){return a.v==b.v;}
 inline bool operator!=(F24 a,F24 b){return a.v!=b.v;}
@@ -48,6 +55,10 @@ inline float x87_float(F24 a){return a.v;}
 // leave the binary32 normal range (each is a multiple of 2^-83 below 2^64),
 // so dot products of four terms need no f24_bad checks.
 inline bool f24_dot_range(const float* v,unsigned n){
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+    (void)v;(void)n;
+    return true;
+#else
     unsigned bad=0;
     for(unsigned k=0;k<n;++k){
         std::uint32_t u;std::memcpy(&u,v+k,4);
@@ -55,5 +66,6 @@ inline bool f24_dot_range(const float* v,unsigned n){
         bad|=unsigned((u&0x7fffffffu)!=0u)&unsigned(e-97u>60u);
     }
     return bad==0u;
+#endif
 }
 }

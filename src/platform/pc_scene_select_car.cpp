@@ -7,6 +7,10 @@
 // run with the matrix recorded at each call.
 #include "platform/pc_scene_renderer.hpp"
 #include "platform/vehicle_model_draw.hpp"
+#include "platform/frontend_vehicle_data.hpp"
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -15,7 +19,92 @@ namespace outrun::platform {
 using driving::Bytes;
 namespace {
 inline float mulf(float a,float b){volatile float x=a*b;return x;}
+
+static bool s_log_initialized = false;
+static int s_last_logged_model = -1;
+
+static void log_car_pmt(unsigned model_index, const char* path, const std::vector<std::uint8_t>& pmt) {
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    if (!outrun::vita_profile::g_sd_logs_enabled) return;
+#endif
+    if (pmt.size() < 16) return;
+    const std::uint32_t object_count = *reinterpret_cast<const std::uint32_t*>(pmt.data());
+    const std::uint32_t texture_count = *reinterpret_cast<const std::uint32_t*>(pmt.data() + 4);
+    const std::uint32_t ss = *reinterpret_cast<const std::uint32_t*>(pmt.data() + 8);
+    const std::uint32_t vs = *reinterpret_cast<const std::uint32_t*>(pmt.data() + 12);
+
+    std::uint32_t total_tris = 0;
+    std::uint32_t obj0_tris = 0;
+
+    if (16 + ss <= pmt.size()) {
+        const std::uint8_t* sys = pmt.data() + 16;
+        for (std::uint32_t oi = 0; oi < object_count; ++oi) {
+            const std::uint32_t obj_off = 24 + oi * 60;
+            if (obj_off + 60 > ss) break;
+            const std::uint32_t* fields = reinterpret_cast<const std::uint32_t*>(sys + obj_off);
+            const std::uint32_t meshes_off = fields[8];
+            const std::uint32_t prims_off = fields[9];
+            const std::uint32_t draws_off = fields[10];
+            const std::uint32_t ranges_off = fields[11];
+
+            if (meshes_off + 8 > ss) continue;
+            const std::uint32_t first_prim = *reinterpret_cast<const std::uint32_t*>(sys + meshes_off);
+            const std::int32_t num_prims = *reinterpret_cast<const std::int32_t*>(sys + meshes_off + 4);
+
+            std::uint32_t obj_tris = 0;
+            for (std::int32_t pi = 0; pi < num_prims; ++pi) {
+                const std::uint32_t p_off = prims_off + (first_prim + pi) * 0x14;
+                if (p_off + 0x14 > ss) break;
+                const std::uint32_t* p_fields = reinterpret_cast<const std::uint32_t*>(sys + p_off);
+                const std::uint32_t fd0 = p_fields[1];
+                const std::int32_t d0 = static_cast<std::int32_t>(p_fields[3]);
+                for (std::int32_t di = 0; di < d0; ++di) {
+                    const std::uint32_t d_off = draws_off + (fd0 + di) * 0x20;
+                    if (d_off + 0x20 > ss) break;
+                    const std::uint32_t r_idx = *reinterpret_cast<const std::uint32_t*>(sys + d_off + 8);
+                    const std::uint32_t r_off = ranges_off + r_idx * 16;
+                    if (r_off + 16 > ss) break;
+                    const std::uint32_t rcount = *reinterpret_cast<const std::uint32_t*>(sys + r_off + 8);
+                    obj_tris += rcount;
+                }
+            }
+            total_tris += obj_tris;
+            if (oi == 0) obj0_tris = obj_tris;
+        }
+    }
+
+    if (!s_log_initialized) {
+        s_log_initialized = true;
+        FILE* fi = std::fopen("ux0:data/outrun2006/car_triangles.txt", "w");
+        if (!fi) fi = std::fopen("car_triangles.txt", "w");
+        if (fi) {
+            std::fprintf(fi, "========================================================\n");
+            std::fprintf(fi, "  REGISTRO EN VIVO DE MODELOS Y POLIGONOS (PS VITA)\n");
+            std::fprintf(fi, "========================================================\n\n");
+            std::fclose(fi);
+        }
+    }
+
+    FILE* f = std::fopen("ux0:data/outrun2006/car_triangles.txt", "a");
+    if (!f) f = std::fopen("car_triangles.txt", "a");
+    if (f) {
+        std::fprintf(f, "[CARGA DE COCHE] Modelo ID: %u\n", model_index);
+        std::fprintf(f, "  Archivo: %s\n", path ? path : "desconocido");
+        std::fprintf(f, "  Bytes PMT Descomprimido: %u (sys=%u, vid=%u)\n", (unsigned)pmt.size(), ss, vs);
+        std::fprintf(f, "  Triangulos Totales del Modelo: %u\n", total_tris);
+        std::fprintf(f, "  Carroceria (Obj 0): %u triangulos\n", obj0_tris);
+        if (total_tris >= 33000) {
+            std::fprintf(f, "  ESTADO: MODELO REDUCIDO / INDICES DE TIRAS (%u tris)\n\n", total_tris);
+        } else {
+            std::fprintf(f, "  ESTADO: MODELO ORIGINAL RETAIL (%u tris)\n\n", total_tris);
+        }
+        std::fflush(f);
+        std::fclose(f);
+    }
 }
+
+} // namespace
+
 bool PcSceneRenderer::display_select_car(){
     Bytes vehicle(nullptr,0),camera(nullptr,0),body(nullptr,0);
     if(!vehicle_camera||!vehicle_camera(vehicle,camera)||!body_view||!body_view(body))return false;
@@ -24,7 +113,14 @@ bool PcSceneRenderer::display_select_car(){
     for(const std::uint32_t id:{VehicleResourceIds[model],0xbbu}){
         if(bank_loaded(id))continue;
         std::vector<std::uint8_t> pmt;std::string error;
-        if(!bank_source||!bank_source(id,pmt)||!load_bank(id,std::move(pmt),error)){++bank_failures;last_error="bank "+std::to_string(id)+": "+error;return false;}
+        if(!bank_source||!bank_source(id,pmt)){
+            ++bank_failures;last_error="bank "+std::to_string(id)+": source missing";return false;
+        }
+        if(id == VehicleResourceIds[model]) {
+            const char* path = (model < VehicleResourcePaths.size()) ? VehicleResourcePaths[model] : "unknown";
+            log_car_pmt(model, path, pmt);
+        }
+        if(!load_bank(id,std::move(pmt),error)){++bank_failures;last_error="bank "+std::to_string(id)+": "+error;return false;}
     }
     PcEnvironmentRenderTables tables{Bytes(environment_.lights_899b98.data(),environment_.lights_899b98.size()),
         Bytes(environment_.fog_7d3a10.data(),environment_.fog_7d3a10.size()),0};

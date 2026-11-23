@@ -25,6 +25,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 namespace outrun::platform {
 namespace {
 // PC statics the passes keep between frames (zero-initialised .bss on the PC
@@ -508,6 +511,9 @@ struct Sun {
         if(!native_race_bank_ensure(p.c,p.r,resource))throw std::runtime_error("sun pass: 448810 bank not loaded");
         auto* bank=p.r.bank_resources(resource);
         if(!bank)throw std::runtime_error("sun pass: 448810 bank not loaded");
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        outrun::vita_profile::set_active_model(outrun::vita_profile::RES_ID_SUN_OCCLUSION, handle & 0xffffu);
+#endif
         if(pmt_object_draw_4116f0(p.fl,*bank,handle&0xffffu,p.s))d.set_pixel_shader(0);
         if(st_.query)d.query_issue(st_.query,1);                          // D3DISSUE_END
     }
@@ -672,7 +678,12 @@ void sun_flare_40cbc0(CoursePass& p,std::uint32_t object){
                 sun.draw_40c980(0x570010u,1.0f);
                 sun.draw_40c980(0x57000fu,1.0f);
                 driving::pc_matrix_pop(s);
-                render_queue_flush_4052c0(p.fl,p.r.queue_context());
+                {
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+                    outrun::vita_profile::FlushScope fs;
+#endif
+                    render_queue_flush_4052c0(p.fl,p.r.queue_context());
+                }
             }
             // The glow, then the flare sprites along the axis towards the sun.
             sun.z_save_406810(0);
@@ -711,7 +722,12 @@ void sun_flare_40cbc0(CoursePass& p,std::uint32_t object){
             sun.flare_40c9a0(0x57000bu,st(X(spread)*X(0.21f)),st(X(size)*X(0.12f)),flare);
             sun.flare_40c9a0(0x57000cu,st(X(spread)*X(0.27f)),st(X(size)*X(0.05f)),flare);
             sun.flare_40c9a0(0x57000du,st(X(spread)*X(0.3f)),st(X(size)*X(0.03f)),flare);
-            render_queue_flush_4052c0(p.fl,p.r.queue_context());
+            {
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+                outrun::vita_profile::FlushScope fs;
+#endif
+                render_queue_flush_4052c0(p.fl,p.r.queue_context());
+            }
             sun.flare_40c9a0(0x570008u,fbits(0xbb449ba6u),1.5f,glow);
             render_pass_defaults_404540(g,p.r.frame().layer_7d25f0);
             sun.z_restore_406870();

@@ -1,6 +1,9 @@
 #include "platform/pc_headlight_pool.hpp"
 #include "driving/pc_d3dx.hpp"
 #include "driving/pc_x87.hpp"
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 #include <cstdlib>
 #include <cstring>
 
@@ -116,6 +119,9 @@ bool pc_headlight_display_4695c0(driving::Bytes car,PcFlushContext& flush,PcD3D9
     auto tss=[&](std::uint32_t type,std::uint32_t v){if(d.get_texture_stage_state(0,type)!=v)d.set_texture_stage_state(0,type,v);};
     tss(2,2);tss(3,0);tss(1,4);tss(5,2);tss(6,0);tss(4,4);
     d.set_fvf(0x142);d.set_vertex_shader(0);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    outrun::vita_profile::set_active_model(outrun::vita_profile::RES_ID_HEADLIGHT, 0);
+#endif
     // SetStreamSource(8A8C84) + DrawPrimitive(TRIANGLESTRIP, i, 6) for i = 0, 8 .. 152:
     // the buffer is static, the same vertices go through the UP path.
     for(std::size_t first=0;first<PcHeadlightVertices;first+=8)

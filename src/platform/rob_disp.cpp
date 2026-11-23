@@ -321,7 +321,7 @@ struct Draw {
             {std::array<float,16> sc{20.0f,0,0,0, 0,1.0f,0,0, 0,0,20.0f,0, 0,0,0,1};
              driving::pc_matrix_multiply_current(c.matrices,driving::Bytes(sc.data(),64));}   // 40A360(20, 1, 20)
             const std::uint32_t preset=m.u32(0x78024cu);
-            object((preset==1u||preset==3u)?0xc30023u:0x12b0023u);
+            leaf(0x405360u,{(preset==1u||preset==3u)?0xc30023u:0x12b0023u,0,0,0,None,0});
             pop();
         }
         push();

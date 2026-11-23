@@ -398,11 +398,10 @@ std::uint32_t frame_call(void* user,std::uint32_t pc,const std::uint32_t*,std::s
     // Force the single-update path while the real input/audio/render services
     // are still explicit boundaries.
     // Above 60 Hz (enhancements/frame_rate.hpp) frames run 0, 1 or more ticks.
-    if(pc==0x455c20u)return enhancements::display_frames()?1u:2u;
+    if(pc==0x455c20u)return 1u;
     if(pc!=0x449050u||!s.presenter)return 0u;
     auto& p=*s.presenter;
     auto& mixer=audio_thread();
-    audio_main_release();   // the mixer thread runs while the frame is recorded
     if(mixer.failed)s.render_failed=true;
     // The START loading picture covers START's loading stages only: from stage 65 the
     // race is loaded and START runs the start camera (4871A0) and the countdown
@@ -418,6 +417,7 @@ std::uint32_t frame_call(void* user,std::uint32_t pc,const std::uint32_t*,std::s
     {std::lock_guard<std::recursive_mutex> audio_lock(audio_mutex());
      ++s.game_frames;if(s.runtime)s.runtime->pc_sound.tick_42f330();
      if(!mixer.run&&!s.render_failed&&!pump_audio(s))s.render_failed=true;}
+    audio_main_release();   // the mixer thread runs while the frame is recorded and drawn
     trace_mark("pc_scene");
     // Widescreen: the PC screen the camera sees becomes 16:9 (its FOV 483C10
     // widens, Hor+); the camera's aspect +B8 (set by 484EE0 at init) follows.
@@ -1097,9 +1097,14 @@ void attach_pc_scene(GameHost& host,pf::NativeRuntimeContext& context,pf::Retail
             if(t.active)(void)pf::native_sprite2d_leaf(context,scene,0x42d710u,t.token);
             return true;}
         if(pc==0x414340u){
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+            return true; // VitaGlD3D9Device drops non-BackBuffer draws; skip 414340 before wait_idle()
+#else
             if(cube_disabled())return false;
             ProfileScope prof(profile_key(ProfileDisplay,0,pc));
-            return pf::native_car_reflection_leaf(context,scene);}
+            return pf::native_car_reflection_leaf(context,scene);
+#endif
+        }
         return pf::native_sprite2d_leaf(context,scene,pc,a);};
     scene.layer_callback=[&context](std::uint32_t layer){return pf::native_race_end_layer_callback(context,layer);};
     scene.mode_84a318=[&context]{return pf::native_race_end_84a318(context);};
@@ -1125,8 +1130,13 @@ void attach_pc_scene(GameHost& host,pf::NativeRuntimeContext& context,pf::Retail
             if(!record||!pf::retail_asset_inflate_sz(record->bytes,pmt)||!scene.load_bank(id,std::move(pmt),e))return nullptr;}
         return scene.bank_resources(id);};
     scene.bank_source=[&retail](std::uint32_t id,std::vector<std::uint8_t>& pmt){
-        const auto* record=pf::retail_asset_lookup(retail,id,id==0xbbu||id==0xbau?2u:11u);
-        return record&&pf::retail_asset_inflate_sz(record->bytes,pmt);};
+        const std::uint32_t mode=(id==0xbbu||id==0xbau)?2u:11u;
+        const auto* record=pf::retail_asset_lookup(retail,id,mode);
+        const bool ok=record&&pf::retail_asset_inflate_sz(record->bytes,pmt);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        if(ok&&mode==11u)retail.loader_cache.erase((std::uint64_t(mode)<<32u)|id);
+#endif
+        return ok;};
 }
 
 // ---------------------------------------------------------------- frontend

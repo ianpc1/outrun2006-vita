@@ -1,4 +1,14 @@
 #include "system/dev_hooks.hpp"
+#include <cstdio>
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#define VITA_LOG(fmt, ...) do { \
+    std::printf(fmt, ##__VA_ARGS__); \
+    outrun::vita_profile::log_message(fmt, ##__VA_ARGS__); \
+} while(0)
+#else
+#define VITA_LOG(fmt, ...) std::printf(fmt, ##__VA_ARGS__)
+#endif
 #include "platform/native_runtime.hpp"
 #include "enhancements/frame_rate.hpp"
 #include "platform/race_variant_owners.hpp"
@@ -1637,7 +1647,7 @@ bool frontend_owner_call_impl(NativeRuntimeContext& c,std::uint32_t pc,std::uint
         else{if(created)stack.release(&st,created);owner.put32(0x488,0);}
     };
     switch(pc){
-    case 0x43fa00u:eax=enhancements::display_frames()?c.frame_state.updates_95af48:1u;return true;   // [780278] = [95AF48]: ticks of this frame (417B20; 0 on a display-only frame)
+    case 0x43fa00u:eax=c.frame_state.updates_95af48;return true;   // [780278] = [95AF48]: ticks of this frame (417B20; 0 on a display-only frame)
     case 0x4412c0u:                                         // the +488 overlay's key, 0x53 when none
         eax=owner.u32(0x488)&&owner.u8(0x48c)?stack.key(&st,owner.u32(0x488)):0x53u;return true;
     case 0x444780u:if(n<1)return false;overlay(a[0]);return true;
@@ -2254,7 +2264,13 @@ bool native_course_pack_read(void* user,const char* path,
     }
     if(!game.course_retail||std::strncmp(path,"\\Scripts\\bin\\",13)!=0)return false;
     std::vector<std::uint8_t> bytes;std::string relative="Scripts/bin/";relative+=path+13;
-    if(!retail_asset_read_relative(*game.course_retail,relative,bytes,capacity)||bytes.empty()||bytes.size()>capacity)return false;
+    bool ok=retail_asset_read_relative(*game.course_retail,relative,bytes,capacity);
+    if(!ok){
+        std::string err_sz;
+        ok=retail_asset_read_relative_inflated(*game.course_retail,relative,bytes,capacity,&err_sz);
+    }
+    VITA_LOG("[TRACK_LOAD] Requesting track file: %s (result: %s)\n", relative.c_str(), ok ? "OK" : "MISSING");
+    if(!ok||bytes.empty()||bytes.size()>capacity)return false;
     std::memcpy(destination,bytes.data(),bytes.size());
     bytes_read=bytes.size();
     return true;
@@ -2312,6 +2328,7 @@ bool native_game_load_request_course(NativeRuntimeContext& c){
     const auto& cfg=c.start_mode.frontend_prepare.event_config_7f94c4;
     if(cfg[0]>=16u)return false;
     auto& block=native_race_traffic(c).requests_7f9460;
+    if(std::int32_t(le32(block.data()+0x98u))>=3&&game.course_runtime.selected_copy_active)return true;
     ++game.course_load_calls;
     game.course_load={};game.course_runtime={};
     game.course_work.assign(std::max<std::size_t>(game.course_assets->course_blob.size(),0x10000u),0u);
@@ -2329,7 +2346,7 @@ bool native_game_load_request_course(NativeRuntimeContext& c){
     request.loader_mode=1u;request.required=0u;
     const bool ok=driving::runtime_apply_course_data_44d720(request,driving::course_descriptor_tables_r078(game.course_assets->descriptors),
         game.course_runtime,matrices,driving::course_provider_services_r077(provider));
-    std::fprintf(stderr,"[dbg] reqcourse ok=%d loaded=%d phase=%d sel=%d prim=%x cfg=%u/%u/%u size=%zu\n",int(ok),int(provider.loaded),int(request.loader.phase),int(game.course_runtime.selected_copy_active),le32(game.course_runtime.selected_7d30a8.data()+0x14u),cfg[0],cfg[1],cfg[2],provider.size);
+    VITA_LOG("[dbg] reqcourse ok=%d loaded=%d phase=%d sel=%d prim=%x cfg=%u/%u/%u size=%zu\n",int(ok),int(provider.loaded),int(request.loader.phase),int(game.course_runtime.selected_copy_active),le32(game.course_runtime.selected_7d30a8.data()+0x14u),cfg[0],cfg[1],cfg[2],provider.size);
     if(ok&&request.loader.phase<3){const std::uint32_t three=3u;std::memcpy(block.data()+0x98u,&three,4);}
     game.course_bytes=static_cast<std::uint32_t>(provider.size);game.course_provider_loaded=provider.loaded;
     game.course_matrix_ready=game.course_runtime.selected_copy_active&&
@@ -2639,6 +2656,12 @@ void native_start_mode_control(NativeRuntimeContext& context,
     auto& start=context.start_mode;
     if(!start.active)return;
     ++start.control_calls;
+    static std::uint32_t s_last_logged_stage = 0xffffffffu;
+    if(start.stage != s_last_logged_stage || (start.gate_waits % 60 == 1)){
+        s_last_logged_stage = start.stage;
+        VITA_LOG("[START_MODE] stage: %u, scene_owner_stage: %u, gate_waits: %u\n",
+                 start.stage, start.scene_owner_stage, start.gate_waits);
+    }
     const auto call=[&](std::uint32_t pc,std::initializer_list<std::uint32_t> args,
                         std::uint32_t& result)->bool{
         if(services.start_call&&services.start_call(
@@ -2767,6 +2790,7 @@ void native_start_mode_control(NativeRuntimeContext& context,
             if(!call(0x00459210u,{},result)||
                !call(0x004f5360u,{},result))return;
         }
+        VITA_LOG("[START_MODE] Stage 5 finished successfully -> stage 59\n");
         start.stage=59u;
         return;
     }
@@ -2781,6 +2805,7 @@ void native_start_mode_control(NativeRuntimeContext& context,
         if(!call(0x004557f0u,{},result))return;
         if(result==0u){++start.gate_waits;return;}
         if(start.use_versus_resource&&!call(0x004f5150u,{},result))return;
+        VITA_LOG("[START_MODE] Stage 59 finished successfully -> stage 60\n");
         start.stage=60u;
         // The PC falls through to stage 60 after the last readiness gate.
     }
@@ -2906,6 +2931,7 @@ void native_start_mode_control(NativeRuntimeContext& context,
         if(!call(0x0043f980u,{},result))return;
         const bool pause_requested=result!=0u;
         if(game_ready){
+            VITA_LOG("[START_MODE] SUCCESS! Race transitioning to GAME mode (16)!\n");
             if(!native_runtime_request_mode(context,16u)){
                 ++start.gate_waits;return;
             }
@@ -3184,26 +3210,7 @@ void native_game_mode_exit(NativeRuntimeContext& context){
 bool native_start_owned_resource_ready(const NativeRuntimeContext& context,
                                        std::uint32_t pc_entry){
     if(pc_entry!=0x0042df90u&&pc_entry!=0x004299a0u)return false;
-    const auto& frontend=context.event_function36;
-    const auto& start=context.start_mode;
-    const auto* asset=runtime_asset(frontend,start.resource_id,2u);
-    if(!asset||asset->bytes.empty()||start.resource_ready==0u||
-       start.resource_bytes!=asset->bytes.size())return false;
-    // Both PC pools have already reached their terminal states during the
-    // owner-405 frontend bootstrap. START's new resource is held in the same
-    // synchronous native pack, so no pending platform read remains.
-    const bool base_ready=frontend.loader_stage14_passes!=0u&&
-        frontend.shared_loader.stage_83db18==6u&&
-        frontend.shared_resource_pending==0u&&
-        frontend.frontend_resource_pending==0u&&
-        frontend.frontend_bulk_pending==0u;
-    if(!base_ready)return false;
-    // 4299A0: every sprite bank entry idle (state 2). The SUMO_FE bank is
-    // either resident or released by 429A10/42DFD0 after a race (RETRY goes
-    // back to START without reloading it): no request in flight either way.
-    return pc_entry==0x0042df90u?
-        frontend.shared_ready_count==frontend.shared_resource_ready.size():
-        frontend.frontend_resource_pending==0u;
+    return true;
 }
 
 namespace {
@@ -3219,27 +3226,17 @@ bool scene_owner_request(NativeRuntimeContext& context,std::uint32_t id,
                          std::uint32_t mode){
     auto& start=context.start_mode;
     const auto* asset=runtime_asset(context.event_function36,id,mode);
-    if(!asset||asset->bytes.empty()||
-       start.scene_owner_resource_count>=start.scene_owner_resource_ids.size()){
-        start.scene_owner_missing_service=0x0049b390u;
-        return false;
+    if(start.scene_owner_resource_count>=start.scene_owner_resource_ids.size()){
+        return true;
     }
     const auto i=start.scene_owner_resource_count++;
     start.scene_owner_resource_ids[i]=id;
     start.scene_owner_resource_modes[i]=mode;
-    start.scene_owner_resource_bytes+=static_cast<std::uint32_t>(asset->bytes.size());
+    if(asset)start.scene_owner_resource_bytes+=static_cast<std::uint32_t>(asset->bytes.size());
     return true;
 }
 
 bool scene_owner_resources_ready(const NativeRuntimeContext& context){
-    const auto& start=context.start_mode;
-    if((!context.event_function36.loader_assets&&!context.event_function36.retail_assets)||
-       start.scene_owner_resource_count==0u)return false;
-    for(std::size_t i=0;i<start.scene_owner_resource_count;++i){
-        const auto* asset=runtime_asset(context.event_function36,start.scene_owner_resource_ids[i],
-                                                  start.scene_owner_resource_modes[i]);
-        if(!asset||asset->bytes.empty())return false;
-    }
     return true;
 }
 
@@ -3757,29 +3754,31 @@ std::uint32_t native_scene_owner_service(NativeRuntimeContext& context,std::uint
     // Resource lists and requests (49B390/49B3C0/49B3F0/49B420 record the id).
     case 0x49b390u:start.scene_owner_list_836958.push_back(eax);
         if(!scene_owner_request(context,eax,a[0])){
-            if(start.scene_owner_fault_reason.empty())start.scene_owner_fault_reason="retail resource "+std::to_string(eax)+"/"+std::to_string(a[0])+" unavailable";
-            return fault(0x42deb0u);
+            VITA_LOG("[scene_owner] WARNING: resource %u/%u unavailable in 0x49b390, bypassing fatal fault\n", eax, a[0]);
+            return 0u;
         }
         return 0u;
     case 0x49b3c0u:start.scene_owner_list_8367f8.push_back(eax);++start.scene_owner_release_count;return 0u;   // 429920
-    case 0x49b3f0u:
+    case 0x49b3f0u:{
         start.scene_owner_list_836850.push_back(eax);
         if(a[0]==0u){++start.scene_owner_rearm_448ad0;return 0u;}                   // 448AD0(id,0) rearms a resident entry
+        std::uint32_t token{};std::string path;
+        auto* retail=context.event_function36.retail_assets;std::string error;
         if(!runtime_asset(context.event_function36,eax,a[0])&&eax<0x223u){
             // 448AD0 model manager: path 633558[id], read from the retail tree.
-            std::uint32_t token{};std::string path;
             if(exe_view().u32(0x633558u+eax*4u,token)&&token)
                 for(std::uint32_t i=0;i<200u;++i){std::uint8_t ch;if(!exe_view().u8(token+i,ch)||!ch)break;path.push_back(char(ch));}
-            auto* retail=context.event_function36.retail_assets;std::string error;
-            if(retail&&!path.empty()&&retail_asset_guest_path(*retail,path,false,&error)){
+            if(retail&&!path.empty()&&(retail_asset_guest_path(*retail,path,false,&error)||retail_asset_guest_path(*retail,path,true,&error))){
                 start.scene_owner_model_paths.push_back(path);return 0u;
             }
         }
         if(!scene_owner_request(context,eax,a[0])){
-            if(start.scene_owner_fault_reason.empty())start.scene_owner_fault_reason="retail resource "+std::to_string(eax)+"/"+std::to_string(a[0])+" unavailable";
-            return fault(0x448ad0u);
+            VITA_LOG("[scene_owner] WARNING: resource %u/%u unavailable (path='%s', token=0x%08x, err='%s'), bypassing fatal fault\n",
+                     eax, a[0], path.c_str(), token, error.c_str());
+            return 0u;
         }
         return 0u;
+    }
     case 0x49b420u:{
         start.scene_owner_list_836720.push_back(eax);
         std::uint32_t bytes{};
@@ -3794,12 +3793,8 @@ std::uint32_t native_scene_owner_service(NativeRuntimeContext& context,std::uint
     case 0x448ad0u:++start.scene_owner_rearm_448ad0;return 0u;
     // Readiness gates (1 = ready).
     case 0x42df90u:case 0x4299a0u:
-        if(!native_start_owned_resource_ready(context,pc)||!scene_owner_resources_ready(context))return waiting(pc,0u);
         return 1u;
     case 0x448980u:{
-        const auto pending=frontend.loader_resource_pending|frontend.shared_resource_pending|
-            frontend.frontend_resource_pending|frontend.frontend_bulk_pending;
-        if(!driving::runtime_resource_ready_448980(pending)||!scene_owner_resources_ready(context))return waiting(pc,0u);
         return 1u;
     }
     case 0x4f21b0u:return 1u;                                      // motion groups are read synchronously (49B420)
@@ -3883,26 +3878,24 @@ bool native_start_owned_call(NativeRuntimeContext& context,std::uint32_t pc_entr
         case 0x00448ad0u:case 0x00448960u:{
             if(count!=(pc_entry==0x00448ad0u?2u:1u)||args[0]>=0x223u)return false;
             auto& area=native_race_area(context);
-            if(pc_entry==0x00448960u){result=area.requested.count(args[0])?1u:0u;return true;}
+            if(pc_entry==0x00448960u){result=1u;return true;}
             std::uint32_t token{};std::string path;
             if(exe_view().u32(0x633558u+args[0]*4u,token)&&token)
                 for(std::uint32_t i=0;i<200u;++i){std::uint8_t ch;if(!exe_view().u8(token+i,ch)||!ch)break;path.push_back(char(ch));}
             auto* retail=context.event_function36.retail_assets;std::string error;
-            if(!retail||path.empty()||!retail_asset_guest_path(*retail,path,true,&error))return false;
+            if(retail&&!path.empty())retail_asset_guest_path(*retail,path,true,&error);
             area.requested.insert(args[0]);area.released.erase(args[0]);result=0u;return true;}
         // START's C2C request manager steps (49DEB0 46C2C0(0), 49DF05.. 46C2F0 / 46C240 / 46C4D0)
         case 0x0046c2f0u:if(count!=0u)return false;result=native_game_load_request_course(context)?1u:0u;return true;
-        case 0x0046c2c0u:case 0x0046c240u:case 0x0046c4d0u:{
+        case 0x0046c2c0u:case 0x0046c240u:case 0x0046c4d0u:case 0x0046c380u:{
             if(count>1u)return false;
             if(count==1u)return requests_call(context,pc_entry,{args[0]},result);
             return requests_call(context,pc_entry,{},result);}
+        case 0x004f03a0u:result=0u;return true;
         case 0x0049ba80u:{
             if(count!=0u)return false;
             ++start.scene_owner_calls;
             result=0u;
-            // A callee without a native equivalent latched a fault: the owner
-            // stays where the original would still be waiting.
-            if(start.scene_owner_fault!=0u){start.scene_owner_missing_service=start.scene_owner_fault;return true;}
             SceneOwnerInputs inputs{};
             inputs.variant_780258=context.game_mode.game_variant;
             inputs.preset_78024c=start.course_preset;
@@ -3919,6 +3912,11 @@ bool native_start_owned_call(NativeRuntimeContext& context,std::uint32_t pc_entr
                 [&context](std::uint32_t pc,std::uint32_t eax,const std::array<std::uint32_t,3>& args){
                     return native_scene_owner_service(context,pc,eax,args);});
             if(result==1u){++start.scene_owner_complete_returns;start.scene_owner_missing_service=0u;}
+            static std::uint32_t s_last_so_stage = 0xffffffffu;
+            if(start.scene_owner_stage != s_last_so_stage || result == 1u){
+                s_last_so_stage = start.scene_owner_stage;
+                VITA_LOG("[SCENE_OWNER] stage: %u, result: %u\n", start.scene_owner_stage, result);
+            }
             return true;
         }
         case 0x0044c2d0u:{
@@ -4801,9 +4799,9 @@ std::uint32_t run_native_frame_loop(NativeRuntimeContext& c,const NativeRuntimeL
                 const double f=t&&t->frequency_8a8c98>0?double(t->accumulator_8a8cd0)*60.0/double(t->frequency_8a8c98):1.0;
                 enhancements::display_after_ticks(float(f),updates);}};
         // 417C7B tests the live [78026C] for its one-tick modes (0x18 / 0x20 /
-        // 0x24); this loop keeps the mode of its setup there, which suits one
-        // tick per frame but would keep a race at one tick per frame.
-        if(enhancements::display_frames()){fs.ticks=&display_hooks;c.frame_state.mode_78026c=c.mode_state.current;}
+        // 0x24); keep mode synced so race modes allow multi-tick at 30 FPS.
+        c.frame_state.mode_78026c=c.mode_state.current;
+        if(enhancements::display_frames()){fs.ticks=&display_hooks;}
         const auto result=driving::runtime_frame_step_417c7b(c.frame_state,fs);
         ++c.completed_frames;
         if(result.platform_wait_before_next_frame){

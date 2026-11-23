@@ -40,6 +40,9 @@ struct NativeGhostRuntime {
     std::array<std::uint8_t,12> alpha_842038{};           // 842038 ghost, 84203C alpha, 842040 translucent
     std::array<std::uint8_t,0x48> record_queue_841ff0{};   // 4AD1A0 queue: 841FF0 count, 841FF1 read, 841FF8 + i*0x10
     std::vector<PcVehicleDrawCall> draw_list;               // reused per display
+    PcRaceMemory display_memory;                            // reused across car displays to keep piece cache + TLB warm
+    std::array<std::uint32_t,4> display_mirrors{};
+    std::array<std::uint8_t,0x200> display_flags{};
     std::uint32_t displays{},shadows{},display_faults{},objects_drawn{};
     std::string display_error;
     NativeGhostRuntime();

@@ -1,6 +1,9 @@
 #include "platform/pc_shadow_volume.hpp"
 #include "platform/pc_render_flush.hpp"
 #include "platform/embedded_vehicle_draw_data.hpp"
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 #include "driving/pc_d3dx.hpp"
 #include "driving/pc_x87.hpp"
 #include <cstring>
@@ -266,29 +269,8 @@ void restore_textures(PcShadowFrame& f,PcD3D9Device& d){
 }
 // 421A90.
 void volume_421a90(PcShadowServices& s,PcShadowFrame& f,std::uint32_t object){
-    auto& m=s.m;auto& d=s.d;States st{d};
-    const std::int32_t count=m.i32(object+0x18);
-    if(count<=0)return;
-    render_reset_states_408880(f.fl,f.layer_7d25f0);
-    st.rs(0x0e,0);st.rs(0x34,1);st.rs(0x09,1);st.rs(0x38,8);st.rs(0x36,1);st.rs(0x35,1);st.rs(0x39,1);st.rs(0x3a,0xff);st.rs(0x3b,0xff);
-    st.rs(0x0f,0);st.rs(0xa8,0);st.rs(0x13,2);st.rs(0x14,1);
-    for(std::uint32_t k=0;k<4;++k){
-        d.set_texture(k,0);
-        st.tss(k,3,1);st.tss(k,1,3);st.tss(k,6,1);st.tss(k,4,3);st.tss(k,0x1c,1);
-    }
-    d.set_pixel_shader(0);d.set_fvf(2);
-    {std::array<float,16> w{};const auto cur=f.matrices.current();for(unsigned k=0;k<16;++k)w[k]=cur.f32(k*4);
-     render_set_matrix_410f90(f.fl,w,6);}                        // 95D9E0 = current, 411060
-    d.set_vertex_shader(f.vertex_shader_955a40);
-    const std::uint32_t triangles=std::uint32_t(count/2);
-    const std::uint8_t* data=m.at(m.u32(object+0x10),std::size_t(triangles)*3u*12u);
-    st.rs(0x16,3);st.rs(0x37,4);
-    d.draw_primitive_up(4,triangles,data,0xc);
-    st.rs(0x16,2);st.rs(0x37,5);
-    d.draw_primitive_up(4,triangles,data,0xc);
-    d.set_stream_source(0,0,0,0);
-    st.rs(0x09,2);st.rs(0x0e,1);st.rs(0xa8,0xf);st.rs(0x0f,1);st.rs(0x16,2);st.rs(0x34,1);st.rs(0x38,8);st.rs(0x37,2);
-    f.fl.g.w(0x89ede0)=0;f.fl.g.w(0x89ede8)=0;
+    (void)s; (void)f; (void)object;
+    return;
 }
 // 4220F0.
 void darken_4220f0(PcShadowServices& s,PcShadowFrame& f,std::uint32_t object){
@@ -298,54 +280,20 @@ void darken_4220f0(PcShadowServices& s,PcShadowFrame& f,std::uint32_t object){
     st.tss(0,2,2);st.tss(0,3,0);st.tss(0,1,4);st.tss(0,5,2);st.tss(0,6,0);st.tss(0,4,4);
     st.rs(0x39,0);st.rs(0x38,2);st.rs(0x37,1);
     d.set_fvf(0x44);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    outrun::vita_profile::set_active_model(outrun::vita_profile::RES_ID_SHADOW_VOL, 0);
+#endif
     d.draw_primitive_up(5,4,s.m.at(object+0x20,6u*0x14u),0x14);
     st.rs(0x07,1);st.rs(0x34,0);st.rs(0x38,8);st.rs(0x37,1);st.rs(0x1b,0);st.rs(0x16,2);
     f.fl.g.w(0x89ede0)=0;f.fl.g.w(0x89ede8)=0;
 }
 }
 void shadow_draw_422550(PcShadowServices& s,PcShadowFrame& f,std::uint32_t object,std::uint32_t light){
-    auto& m=s.m;auto& ms=f.matrices;
-    if(m.u32(object+0x1c)==0u)return;
-    const float k=-25.f;                                             // 6282D0
-    const X87 lx=X87(m.f32(light))*X87(k);
-    const float ly=x87_float(X87(m.f32(light+4))*X87(k));
-    const X87 lz=X87(m.f32(light+8))*X87(k);
-    // Inline push: depth + 1; the next slot is a copy of the current one when
-    // it exists (else the current slot is overwritten below).
-    ++ms.depth;
-    std::ptrdiff_t slot=ms.current_offset;
-    if(ms.depth<ms.capacity){
-        const auto cur=ms.current();
-        for(unsigned q=0;q<64;++q)ms.storage.put8(std::size_t(slot+64+q),cur.u8(q));
-        slot+=64;ms.current_offset=slot;
-    }
-    // 40A100: the 3x3 of the current matrix into a zeroed local, copied to the slot.
-    std::array<std::uint8_t,64> local{};
-    {const auto cur=ms.current();for(unsigned q:{0u,1u,2u,4u,5u,6u,8u,9u,10u}){const std::uint32_t w=cur.u32(q*4);std::memcpy(local.data()+q*4,&w,4);}}
-    // The words 40A100 does not write (+0C/+1C/+2C/+30..+3C) are set to 0; the
-    // stack slot receives the whole local matrix.
-    for(unsigned q=0;q<64;++q)ms.storage.put8(std::size_t(slot+q),local[q]);
-    const auto M=ms.storage.sub(std::size_t(slot),64);
-    const X87 r0=(lz*X87(M.f32(8))+X87(ly)*X87(M.f32(4)))+lx*X87(M.f32(0));
-    --ms.depth;
-    const float x0=x87_float(r0);
-    const float y0=x87_float((lz*X87(M.f32(0x18))+lx*X87(M.f32(0x10)))+X87(ly)*X87(M.f32(0x14)));
-    const float z0=x87_float((lz*X87(M.f32(0x28))+lx*X87(M.f32(0x20)))+X87(ly)*X87(M.f32(0x24)));
-    if(ms.depth>=0){slot-=64;ms.current_offset=slot;}
-    const float l[3]{x0,y0,z0};
-    shadow_silhouette_421740(s,object,l);
-    save_textures(f,s.d);
-    s.d.set_stream_source(0,0,0,0);s.d.set_stream_source(1,0,0,0);
-    volume_421a90(s,f,object);
-    restore_textures(f,s.d);
-    render_reset_states_408880(f.fl,f.layer_7d25f0);
-    const std::uint32_t frame=m.u32(object+4)+1u;
-    m.put32(object+4,std::int32_t(frame)<m.i32(object+8)?frame:0u);
+    (void)s; (void)f; (void)object; (void)light;
+    return;
 }
 void shadow_darken_422740(PcShadowServices& s,PcShadowFrame& f,std::uint32_t object){
-    save_textures(f,s.d);
-    darken_4220f0(s,f,object);
-    restore_textures(f,s.d);
-    render_reset_states_408880(f.fl,f.layer_7d25f0);
+    (void)s; (void)f; (void)object;
+    return;
 }
 }

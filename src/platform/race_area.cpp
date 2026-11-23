@@ -57,7 +57,7 @@ void PcRaceMemory::build() const {
     // Same list as an earlier build: its table (pieces index the same regions).
     for(auto& c:cache_)if(!c.regions.empty()&&same_regions(c.regions,regions_)){
         table_=std::size_t(&c-cache_.data());dirty_=false;last_=0;last2_=0;built_=regions_.size();
-        overlay_lo_=~0ull;overlay_hi_=0;return;}
+        overlay_lo_=~0ull;overlay_hi_=0;clear_tlb();return;}
     // Sweep over the region edges with the set of covering regions: the
     // newest (highest index) owns the interval up to the next edge.
     struct Edge { std::uint64_t at; std::size_t region; bool open; };
@@ -80,7 +80,7 @@ void PcRaceMemory::build() const {
         bool same=ref.size()==pieces_.size();
         for(std::size_t i=0;same&&i<ref.size();++i)same=ref[i].lo==pieces_[i].lo&&ref[i].hi==pieces_[i].hi&&ref[i].region==pieces_[i].region;
         if(!same)throw std::logic_error("PcRaceMemory: sweep table differs from the reference");}
-    dirty_=false;last_=0;last2_=0;built_=regions_.size();overlay_lo_=~0ull;overlay_hi_=0;
+    dirty_=false;last_=0;last2_=0;built_=regions_.size();overlay_lo_=~0ull;overlay_hi_=0;clear_tlb();
     auto& c=cache_[cache_next_];cache_next_=(cache_next_+1u)%cache_.size();
     c.regions=regions_;c.pieces.swap(pieces_);table_=std::size_t(&c-cache_.data());
 }
@@ -96,7 +96,8 @@ const PcRaceMemory::Region* PcRaceMemory::find(std::uint32_t a,std::size_t n) co
     // Overlays: the newest region touching the access owns it if it covers it
     // whole; touching only part of it, the access straddles a piece edge of
     // the full table and is refused like there.
-    if(regions_.size()>built_&&hi>overlay_lo_&&lo<overlay_hi_)for(std::size_t i=regions_.size();i-->built_;){
+    const bool has_overlays=regions_.size()>built_;
+    if(has_overlays&&hi>overlay_lo_&&lo<overlay_hi_)for(std::size_t i=regions_.size();i-->built_;){
         const auto& r=regions_[i];
         if(!r.size)continue;
         const std::uint64_t rlo=r.base,rhi=std::uint64_t(r.base)+r.size;
@@ -104,24 +105,25 @@ const PcRaceMemory::Region* PcRaceMemory::find(std::uint32_t a,std::size_t n) co
         return lo>=rlo&&hi<=rhi?&r:nullptr;
     }
     const auto& pieces_=cache_[table_].pieces;
-    if(last_<pieces_.size()){const auto& p=pieces_[last_];if(lo>=p.lo&&hi<=p.hi)return &regions_[p.region];}
-    if(last2_<pieces_.size()){const auto& p=pieces_[last2_];if(lo>=p.lo&&hi<=p.hi){std::swap(last_,last2_);return &regions_[p.region];}}
+    auto fill_tlb=[&](const Piece& p,const Region& r){
+        if(p.hi<=0xffffffffull&&(!has_overlays||hi<=overlay_lo_||lo>=overlay_hi_)){
+            auto& e=tlb_[(a>>10)&63u];
+            e.lo=std::uint32_t(p.lo);e.hi=std::uint32_t(p.hi);
+            e.base=r.base;e.writable=r.writable?1u:0u;e.data=r.data;
+        }
+    };
+    if(last_<pieces_.size()){const auto& p=pieces_[last_];if(lo>=p.lo&&hi<=p.hi){const auto& r=regions_[p.region];fill_tlb(p,r);return &r;}}
+    if(last2_<pieces_.size()){const auto& p=pieces_[last2_];if(lo>=p.lo&&hi<=p.hi){std::swap(last_,last2_);const auto& r=regions_[p.region];fill_tlb(p,r);return &r;}}
     std::size_t l=0,h=pieces_.size();
     while(l<h){const auto m=(l+h)/2;if(pieces_[m].hi<=lo)l=m+1;else h=m;}
-    if(l<pieces_.size()&&lo>=pieces_[l].lo&&hi<=pieces_[l].hi){last2_=last_;last_=l;return &regions_[pieces_[l].region];}
+    if(l<pieces_.size()&&lo>=pieces_[l].lo&&hi<=pieces_[l].hi){last2_=last_;last_=l;const auto& p=pieces_[l];const auto& r=regions_[p.region];fill_tlb(p,r);return &r;}
     return nullptr;
 }
-std::uint8_t* PcRaceMemory::at(std::uint32_t a,std::size_t n,bool write) const {
+std::uint8_t* PcRaceMemory::at_slow(std::uint32_t a,std::size_t n,bool write) const {
     const auto* r=find(a,n);if(!r)throw PcRaceUnmapped(a,n);
     if(write&&!r->writable)throw std::logic_error(unmapped_text(a,n)+" (read-only)");
     return r->data+(a-r->base);
 }
-std::uint16_t PcRaceMemory::u16(std::uint32_t a) const {std::uint16_t v;std::memcpy(&v,at(a,2),2);return v;}
-std::uint32_t PcRaceMemory::u32(std::uint32_t a) const {std::uint32_t v;std::memcpy(&v,at(a,4),4);return v;}
-float PcRaceMemory::f32(std::uint32_t a) const {float v;std::memcpy(&v,at(a,4),4);return v;}
-void PcRaceMemory::put16(std::uint32_t a,std::uint16_t v) const {std::memcpy(at(a,2,true),&v,2);}
-void PcRaceMemory::put32(std::uint32_t a,std::uint32_t v) const {std::memcpy(at(a,4,true),&v,4);}
-void PcRaceMemory::putf(std::uint32_t a,float v) const {std::memcpy(at(a,4,true),&v,4);}
 PcRaceAreaState::PcRaceAreaState():data(RaceAreaDataImage,RaceAreaDataImage+(DataEnd-DataBase)){}
 void race_area_map_tables(PcRaceMemory& m){
     for(std::size_t i=0;i<EmbeddedExeRangeCount;++i){

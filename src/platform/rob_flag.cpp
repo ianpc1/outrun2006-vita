@@ -2,6 +2,9 @@
 #include "platform/rob_osage.hpp"
 #include "platform/pc_pmt_loader.hpp"
 #include "platform/race_particles.hpp"
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#endif
 #include "driving/pc_d3dx.hpp"
 #include "driving/pc_matrix_stack.hpp"
 #include "driving/pc_x87.hpp"
@@ -261,6 +264,9 @@ void rob_flag_draw_401b80(PcRobFlagDraw& f,std::uint32_t vertices,std::uint32_t 
     const std::uint8_t* ip=f.mesh.at(indices,std::size_t(index_count)*2u);
     for(std::uint32_t i=0;i<index_count;++i){std::uint16_t x;std::memcpy(&x,ip+i*2u,2);top=std::max<std::uint32_t>(top,x);}
     const std::uint8_t* vp=f.mesh.at(vertices,std::size_t(top+1u)*0x28u);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    outrun::vita_profile::set_active_model(outrun::vita_profile::RES_ID_FLAGMAN, 0);
+#endif
     d.draw_indexed_primitive_up(5,0,used,count,ip,0x65u,vp,0x28u);
     // 41B7A0.
     for(const auto& s:ParticleSavedStates41b5c0)rs(s[0],f.save.u32(s[1]));

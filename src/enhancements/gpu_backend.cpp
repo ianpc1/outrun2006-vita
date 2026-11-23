@@ -36,7 +36,7 @@ bool GpuVideoBackend::parse_option(const std::string& key,const std::string& val
     if(key=="widescreen"){s.widescreen=std::strtoul(value.c_str(),nullptr,10)!=0;return true;}
     if(key=="resolution")return parse_resolution(value,s.resolution);
     if(key=="antialiasing")return parse_antialiasing(value,s.antialiasing);
-    if(key=="framerate"){const auto r=std::strtoul(value.c_str(),nullptr,10);if(r!=60&&r!=120)return false;s.frame_rate=std::uint32_t(r);return true;}
+    if(key=="framerate"){const auto r=std::strtoul(value.c_str(),nullptr,10);if(r!=30&&r!=60&&r!=120)return false;s.frame_rate=std::uint32_t(r);return true;}
     return false;
 }
 }

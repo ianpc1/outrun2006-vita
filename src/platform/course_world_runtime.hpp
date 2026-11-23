@@ -54,10 +54,7 @@ public:
     driving::CourseWorldTables tables() const;
     // No lane admitted (frontend modes before a course loads): the EXE queries an empty world.
     driving::CourseWorldTables tables_or_empty() const {
-        if(query_ready())return tables();
-        driving::CourseWorldTables t{};
-        for(std::uint32_t i=0;i<t.courses.size();++i){t.courses[i].load_type=i;t.courses[i].polygons_present=false;}
-        return t;
+        return tables();
     }
     bool ground_at(float x,float z,float reference_height,CourseWorldGroundSample& sample);
     // 780208[lane]: the lanes' course length offsets (43DBA0 tail: lane 0 after lane 1's last

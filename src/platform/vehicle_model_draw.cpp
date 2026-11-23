@@ -505,6 +505,7 @@ void vehicle_race_model_draw_469600(const PcRaceModelDraw& in,PcMatrixStack& s,s
             driving::pc_matrix_rotate_y(s,word_angle(car.i16(0x2e)));
             if(car.f32(0x2c8)>0.f)driving::pc_matrix_rotate_y(s,car.f32(0x2e8));
         }
+        draw_0(layout.u32(0xc));
         driving::pc_matrix_pop(s);
     }
     record(0x4052b0,{});

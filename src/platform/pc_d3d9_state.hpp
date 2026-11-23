@@ -58,18 +58,38 @@ public:
         vs_dirty_lo=0u;vs_dirty_hi=256u;
     }
     std::uint32_t get_render_state(std::uint32_t s)override{return s<render.size()?render[s]:0u;}
-    void set_render_state(std::uint32_t s,std::uint32_t v)override{if(s<render.size())render[s]=v;}
+    void set_render_state(std::uint32_t s,std::uint32_t v)override{
+        if(s<render.size()){
+            if(render[s]==v)return;
+            render[s]=v;
+        }
+    }
     std::uint32_t get_texture(std::uint32_t s)override{if(s>=textures.size())return 0;if(textures[s])add_ref(textures[s]);return textures[s];}
-    void set_texture(std::uint32_t s,std::uint32_t t)override{if(s<textures.size())textures[s]=t;}
+    void set_texture(std::uint32_t s,std::uint32_t t)override{
+        if(s<textures.size()){
+            if(textures[s]==t)return;
+            textures[s]=t;
+        }
+    }
     std::uint32_t get_texture_stage_state(std::uint32_t s,std::uint32_t t)override{return s<stage.size()&&t<stage[0].size()?stage[s][t]:0u;}
-    void set_texture_stage_state(std::uint32_t s,std::uint32_t t,std::uint32_t v)override{if(s<stage.size()&&t<stage[0].size())stage[s][t]=v;}
+    void set_texture_stage_state(std::uint32_t s,std::uint32_t t,std::uint32_t v)override{
+        if(s<stage.size()&&t<stage[0].size()){
+            if(stage[s][t]==v)return;
+            stage[s][t]=v;
+        }
+    }
     std::uint32_t get_sampler_state(std::uint32_t s,std::uint32_t t)override{return s<sampler.size()&&t<sampler[0].size()?sampler[s][t]:0u;}
-    void set_sampler_state(std::uint32_t s,std::uint32_t t,std::uint32_t v)override{if(s<sampler.size()&&t<sampler[0].size())sampler[s][t]=v;}
-    void set_vertex_declaration(std::uint32_t d)override{declaration=d;}
-    void set_vertex_shader(std::uint32_t s)override{vertex_shader=s;}
-    void set_pixel_shader(std::uint32_t s)override{pixel_shader=s;}
+    void set_sampler_state(std::uint32_t s,std::uint32_t t,std::uint32_t v)override{
+        if(s<sampler.size()&&t<sampler[0].size()){
+            if(sampler[s][t]==v)return;
+            sampler[s][t]=v;
+        }
+    }
+    void set_vertex_declaration(std::uint32_t d)override{if(declaration!=d)declaration=d;}
+    void set_vertex_shader(std::uint32_t s)override{if(vertex_shader!=s)vertex_shader=s;}
+    void set_pixel_shader(std::uint32_t s)override{if(pixel_shader!=s)pixel_shader=s;}
     void set_stream_source(std::uint32_t s,std::uint32_t b,std::uint32_t o,std::uint32_t st)override{if(s<streams.size())streams[s]={b,o,st};}
-    void set_indices(std::uint32_t b)override{indices=b;}
+    void set_indices(std::uint32_t b)override{if(indices!=b)indices=b;}
     void set_vertex_shader_constant_f(std::uint32_t start,const float* d,std::uint32_t n)override{
         for(std::uint32_t k=0;k<n&&start+k<vs_constants.size();++k)std::memcpy(vs_constants[start+k].data(),d+k*4,16);
         if(start<vs_constants.size()&&n){vs_dirty_lo=std::min(vs_dirty_lo,start);
@@ -230,7 +250,11 @@ public:
     std::array<float,16> transform_world{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1},transform_view=transform_world,transform_proj=transform_world;
     void set_transform(std::uint32_t state,const float m[16])override{
         auto* t=state==0x100u?&transform_world:state==2u?&transform_view:state==3u?&transform_proj:nullptr;
-        if(t)for(unsigned k=0;k<16;++k)(*t)[k]=m[k];}
+        if(t){
+            if(std::memcmp(t->data(),m,sizeof(float)*16)==0)return;
+            std::memcpy(t->data(),m,sizeof(float)*16);
+        }
+    }
     // world * view * projection (row vectors), the fixed-function vertex transform.
     std::array<float,16> transform_wvp()const{
         auto mul=[](const std::array<float,16>& a,const std::array<float,16>& b){std::array<float,16> r{};

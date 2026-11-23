@@ -15,7 +15,9 @@ std::int32_t step(std::int32_t n,std::uint32_t delta){
 }
 // Binary32 fast path of the x87 routines below (pc_x87_f24.hpp): body<F24>,
 // and body<X87> again when an operation left the binary32 normal range.
-#if OR2_X87_FAST && !defined(OR2_F24_OFF)
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+template<class Body> auto run24(Body&& body){return body(F24{});}
+#elif OR2_X87_FAST && !defined(OR2_F24_OFF)
 template<class Body> auto run24(Body&& body){f24_bad=0;auto r=body(F24{});if(f24_bad)r=body(X87{});return r;}
 #else
 template<class Body> auto run24(Body&& body){return body(X87{});}
@@ -77,12 +79,10 @@ void pc_matrix_push_load(PcMatrixStack& s,Bytes matrix){
 }
 void pc_matrix_pop(PcMatrixStack& s){
     const auto next=step(s.depth,0xffffffffu);
-    if(next>=0){
-        if(s.current_offset<std::numeric_limits<std::ptrdiff_t>::min()+64)
-            throw std::out_of_range("matrix pointer offset underflow");
+    if(next>=0&&s.depth<s.capacity&&s.current_offset>=64){
         s.current_offset-=64;
     }
-    s.depth=next; // Underflow leaves the pointer unchanged, not depth clamped.
+    s.depth=next; // Underflow/overflow leaves the pointer in-bounds.
 }
 void pc_matrix_load(PcMatrixStack& s,Bytes matrix){
     matrix.check(0,64);auto to=s.current();
@@ -134,7 +134,19 @@ CourseProbe pc_inverse_point(Bytes m,const CourseProbe& p){
 }
 CourseProbe pc_transform_point(Bytes m,const CourseProbe& p){
     m.check(0,64);
-#if OR2_X87_FAST && !defined(OR2_F24_OFF)
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+    const float* f = reinterpret_cast<const float*>(m.data());
+    float q0 = ((p.x*f[0]+p.y*f[4])+p.z*f[8])+f[12];
+    float q1 = ((p.x*f[1]+p.y*f[5])+p.z*f[9])+f[13];
+    float q2 = ((p.x*f[2]+p.y*f[6])+p.z*f[10])+f[14];
+    const float q3 = ((p.x*f[3]+p.y*f[7])+p.z*f[11])+f[15];
+    const float diff = q3 - 1.0f;
+    if (!(diff >= -1.1920928955078125e-7f && diff <= 1.1920928955078125e-7f) && q3 != 0.0f) {
+        const float inv = 1.0f / q3;
+        q0 *= inv; q1 *= inv; q2 *= inv;
+    }
+    return {q0, q1, q2};
+#elif OR2_X87_FAST && !defined(OR2_F24_OFF)
     {   // binary32 path (pc_x87_f24.hpp); the x87 model below when it leaves the normal range
         float f[16];std::memcpy(f,m.data(),64);
         f24_bad=0;std::array<float,4> q{};
@@ -174,6 +186,10 @@ CourseProbe pc_matrix_inverse_point(const PcMatrixStack& s,const CourseProbe& p)
 CourseProbe pc_matrix_point(const PcMatrixStack& s,const CourseProbe& p){return pc_transform_point(s.current(),p);}
 CourseProbe pc_matrix_vector(const PcMatrixStack& s,const CourseProbe& p){
     auto m=s.current();m.check(0,44);
+#if OR2_X87_VITA
+    const float* f = reinterpret_cast<const float*>(m.data());
+    return CourseProbe{(p.z*f[8]+p.y*f[4])+p.x*f[0],(p.z*f[9]+p.y*f[5])+p.x*f[1],(p.z*f[10]+p.y*f[6])+p.x*f[2]};
+#else
     float f[11];std::memcpy(f,m.data(),44);
 #if OR2_X87_FAST && !defined(OR2_F24_OFF)
     {const float v[3]{p.x,p.y,p.z};
@@ -187,6 +203,7 @@ CourseProbe pc_matrix_vector(const PcMatrixStack& s,const CourseProbe& p){
         return CourseProbe{x87_float((T(p.z)*T(f[8])+T(p.y)*T(f[4]))+T(p.x)*T(f[0])),
             x87_float((T(p.z)*T(f[9])+T(p.y)*T(f[5]))+T(p.x)*T(f[1])),
             x87_float((T(p.z)*T(f[10])+T(p.y)*T(f[6]))+T(p.x)*T(f[2]))};});
+#endif
 }
 }
 namespace outrun::driving {
@@ -215,6 +232,16 @@ void multiply_into(Bytes out,Bytes a,Bytes b){
     std::array<float,16> temp{}; // D3DX computes into temporary storage for aliasing.
     float fa[16],fb[16];         // every input is read before any output is written
     std::memcpy(fa,a.data(),64);std::memcpy(fb,b.data(),64);
+#if OR2_X87_VITA
+    for(unsigned r=0;r<4;++r){
+        const float a0=fa[r*4+0],a1=fa[r*4+1],a2=fa[r*4+2],a3=fa[r*4+3];
+        temp[r*4+0]=a0*fb[0]+a1*fb[4]+a2*fb[8] +a3*fb[12];
+        temp[r*4+1]=a0*fb[1]+a1*fb[5]+a2*fb[9] +a3*fb[13];
+        temp[r*4+2]=a0*fb[2]+a1*fb[6]+a2*fb[10]+a3*fb[14];
+        temp[r*4+3]=a0*fb[3]+a1*fb[7]+a2*fb[11]+a3*fb[15];
+    }
+    std::memcpy(out.data(),temp.data(),64);return;
+#endif
 #if OR2_X87_FAST && !defined(OR2_F24_OFF)
     if(f24_dot_range(fa,16)&&f24_dot_range(fb,16)){   // binary32, no range checks needed (pc_x87_f24.hpp)
         for(unsigned e=0;e<16;++e){

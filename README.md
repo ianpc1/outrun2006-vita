@@ -1,113 +1,129 @@
-# Status #
+# OutRun 2006: Coast 2 Coast — PS Vita Port
 
-It is not finished yet, so bugs are to be expected.
-Some menus are incorrect, and some visual effects, performance-related aspects,
-game behaviors, and functionality are not final yet.
-Some early enhancements have already been added, including:
-- multiple anti-aliasing methods
-- multiple resolution options
-- widescreen support
-- 120 FPS support
+Port nativo de **OutRun 2006: Coast 2 Coast** (versión PC / Steam) para **PlayStation Vita**, basado en el proyecto [`outrun2-decomp`](https://github.com/r4dius/outrun2-decomp).
 
-Once the decompilation is complete and the remaining issues are fixed,
-additional enhancements will be added, including features from at least:
-https://github.com/emoose/OutRun2006Tweaks
+Ejecuta el motor decompilado del juego de PC de forma nativa sobre **ARM Cortex-A9 + vitaGL (PowerVR SGX543MP4+)** a resolución nativa **960×544** y **30 FPS estables en carrera** (hasta 60 FPS en menús).
 
-# OutRun 2006 Coast 2 Coast: native port
+---
 
-A native port of the PC version of OutRun 2006 Coast 2 Coast (Sumo Digital /
-Sega, 2006) to Nintendo Switch, macOS (Apple silicon), PS5 (homebrew) and
-Xbox One / Series (Developer Mode). The game code is a reconstruction of the
-PC executable in C++ (part of it still translated from x86 by `tools/x86tr`,
-the rest written by hand); the platform layer (graphics, audio, input,
-files, network) is native to each system.
+## Estado actual — Qué funciona
 
-![PS5 at 120 Hz](images/ps5pro-120hz-1.jpg)
-![Switch in handheld mode](images/switch_handheld-1.jpg)
+- **Resolución nativa de PS Vita (`960×544`, 16:9).**
+- **30 FPS bloqueados en carrera** con 2 ticks de simulación de 60 Hz por frame (velocidad real 1×, sin cámara lenta) y **60 FPS opcionales en menús** (`Options > Settings > MENU FRAME RATE`).
+- **Arquitectura multi-núcleo en PS Vita:**
+  - **Core 0:** hilo dedicado de `vitaGL` / GPU (command buffer doble asíncrono).
+  - **Core 1:** lógica del juego, física y recorrido de escena.
+  - **Core 2:** audio, trabajos paralelos de culling y descompresión asíncrona de archivos `.sz` (evita congelamientos al cargar tramos o tráfico).
+- **Modos jugables:** OutRun, Time Attack, Heart Attack (OutRun 2), Coast 2 Coast (carreras estándar / rivales), Showroom, Car Select, Rankings, Licencias y Opciones.
+- **Audio y música:** efectos de sonido y música del juego original (soporte Vorbis `.ogg`).
+- **Cámara de inicio con el Flagman**, guardado de partidas/licencias en `ux0:data/outrun2006/SaveGame/`, y configuración mediante `options.ini` (`sd_logs=0` por defecto para no escribir logs a la SD).
 
-This repository holds code only. **It contains no game data and no part of
-the original executable.** To play, you need your own copy of the game
-(Steam version).
+---
 
-## What you need from your game
+## Qué falta por completar
 
-- The folder of your OutRun 2006 Coast 2 Coast installation (Steam).
-- Its `OR2006C2C.EXE`. The port reads code tables and constants from it at
-  the first launch, checks every range it uses against SHA-256 hashes
-  (`src/system/exe_image_ranges.inc`), then keeps a prepared image,
-  `OR2006C2C.cache`, in the game folder. Later launches only read that file.
+- **Modo Coast 2 Coast — Misiones de Clarissa (`variant 5` / Request Mode):**
+  - Las 82 funciones de lógica bulk ya están compiladas en `vita/source/bulk_vita_tr.cpp`, pero faltan por conectar ~51 servicios externos en `src/platform/race_traffic_runtime.cpp` (14 de mates matriz/vector, 3 de CRT y ~34 getters/helpers de misiones y HUD). Actualmente entra a la carrera pero `race_traffic` se bloquea al llegar al primer servicio sin cablear (`0x48B140`).
+- **Heart Attack en OutRun 2 SP:**
+  - La carrera funciona, pero faltan por mostrar en pantalla las instrucciones de misión y el contador de corazones (en OutRun 2 normal sí aparecen).
+- **Multijugador online / LAN:**
+  - No implementado/probado en PS Vita.
 
-The game files are read in place and never modified; `OR2006C2C.cache` can be
-deleted at any time and is rebuilt at the next launch.
+---
 
-## Layout
+## Limitaciones técnicas en PS Vita (qué no se puede hacer o no es viable)
 
-| Folder | Content |
-| --- | --- |
-| `src/driving`, `src/platform` | the game code, ported function by function (`*_tr.cpp`: code still translated from x86) |
-| `src/*.cpp` (`control`, `asset_views`, `pc_pmt`) | input control, asset views and the PC model (PMT) loader shared by the game code |
-| `src/recomp` | runtime of the translated code (`x86rt.hpp`: guest registers, memory, flags) |
-| `src/system` | files, clocks, EXE image loading and checking, first-launch setup screen |
-| `src/ports` | in-memory extraction of the Steam `OR2006C2C.EXE` (see its `README.md`) |
-| `src/runtime` | the shared game runner (`game_host`) used by every platform |
-| `src/input` | pad and lifecycle adapter shared by the Mac and PS5 builds |
-| `src/enhancements` | port additions kept apart from the reconstructed game: extra Options > Settings rows (aspect ratio, resolution, anti-aliasing, frame rate); each platform lists what it supports (`enhancements_*.cpp` in its `source/`) |
-| `switch/`, `mac/`, `ps5/`, `xbox/` | one folder per platform, same layout in each |
-| `tests/` | unit and regression tests (CTest) |
-| `tools/` | EXE image tools, leak check, x86 translator, decompilation tracking, generators, PS5 build and package scripts |
-| `images/` | screenshots |
+- **60 FPS estables en carrera:** el cuello de botella está en CPU (ARM Cortex-A9 a 444 MHz ejecutando el código x86 traducido + física + recorrido de escena). A 30 FPS con 2 ticks de 60 Hz queda margen estable (~5–8 ms libres); intentar 60 FPS en carrera provoca caídas constantes.
+- **Reflejos dinámicos en cubemap (6 caras por frame) y shaders DX9 originales:**
+  - La versión de PC renderiza un cubemap de entorno de 6 caras cada frame (`0x414340`) y usa pixel/vertex shaders DirectX 9 (`vs_1_1` / `ps_1_4`).
+  - En PS Vita se usa el pipeline fijo de `vitaGL` para mantener el rendimiento, y el cubemap de 6 caras está desactivado porque multiplicaría las pasadas de escena y hundiría los FPS.
+  - Por la misma limitación de `vitaGL`, mezclar `glUseProgram` con el pipeline fijo corrompe los draws de la carretera, y activar `GL_LIGHTING` por coche penaliza el rendimiento en Core 0. Para añadir reflejos/especular reales en GPU haría falta migrar todo el render 3D a un único shader Cg/GLSL unificado.
+- **Sombras volumétricas stencil en coches (`car_shadows`):** desactivadas en Vita por el alto coste de fillrate/draw calls en PowerVR SGX543 (se mantiene la sombra proyectada bajo el coche).
+- **Partículas `D3DPT_POINTLIST`:** ignoradas en `vita_gl_d3d9.cpp` y tope de 64 partículas simultáneas para mantener estables los 30 FPS.
 
-Each platform folder has `source/` (platform code), `tests/`, `tools/`,
-`third_party/` where needed, its build file and a `README.md` on how to
-build and install it. Shader sources are in `switch/shaders` and
-`ps5/shaders`; the Mac, PS5 and Xbox builds generate their shaders from
-them (Metal, SPIR-V, HLSL). `ps5/title` builds the PS5 native title,
-`ps5/sce_sys` holds its tile and backgrounds, `xbox/package` the UWP
-manifest and logos.
+---
 
-`icon.png` and `bg.png` are the project's icon and background.
-`tools/make_icons.ps1` derives each platform's images from them, at the
-size and format each one expects: the Switch NRO icon, the PS5 tile and
-backgrounds, the Xbox package logos and the Mac application icon.
+## Instalación en PS Vita
 
-## Building
+### Requisitos
+1. PS Vita o PS TV con **HENkaku / Enso** y **VitaShell**.
+2. Una copia original de **OutRun 2006: Coast 2 Coast** de PC (Steam/retail), incluyendo `OR2006C2C.EXE` y todas sus carpetas (`BK`, `Cars`, `Chr`, `Common`, `Driver`, `Media`, `OSO`, `Scripts`, `Sound`, `Sprani`, `Sprite`, `Stage`, `Text`, etc.).
+3. ~1.5 GB libres en `ux0:`.
+4. **Overclock recomendado** (ej. PSVshell a 444/500 MHz CPU, 222 MHz GPU) para mantener 30 FPS constantes en todos los circuitos.
 
-| Platform | Command | Details |
-| --- | --- | --- |
-| Nintendo Switch | `make -C switch` | `switch/README.md` |
-| macOS | `cmake --preset mac-full` | `mac/README.md` |
-| PS5 | `Build-PS5.ps1` (Windows + WSL; makes the `.pkg`) | `ps5/README.md` |
-| Xbox | `cmake` with `-DOR2_XBOX=ON` (Visual Studio 2026, UWP) | `xbox/README.md` |
+### Pasos
+1. Instala `OutRun2006.vpk` desde **VitaShell** (acepta los permisos extendidos).
+2. Crea la carpeta `ux0:data/outrun2006/` y copia dentro **todo** el contenido del juego de PC de modo que exista:
+   ```text
+   ux0:data/outrun2006/OR2006C2C.EXE
+   ```
+   junto con todas las carpetas de datos.
+3. Abre **OutRun 2006 C2C** desde el LiveArea. En el primer arranque generará `OR2006C2C.cache` y `options.ini` automáticamente.
 
-Linux host (runner and tests):
+---
 
-    cmake -S . -B build -G Ninja -DOR2_EXE=<your OR2006C2C.EXE> \
-        -DOR2_PC_ASSET_ROOT=<your game folder>
-    cmake --build build
-    ctest --test-dir build
+## Configuración (`ux0:data/outrun2006/options.ini`)
 
-Tests that need the game files take them from these two settings.
+Ejemplo de opciones disponibles:
 
-## Leak check
+```ini
+# OutRun 2006 PS Vita options v2 (edit or change in Options > Settings)
+widescreen=1
+framerate=60
+lod_culling=6
+lod_bias=1
+sd_logs=0
+```
 
-`tools/leak_check.py <your OR2006C2C.EXE> <built binary> --allow tools/leak_check_allow.txt`
-verifies that no byte run of the original executable is compiled into a binary.
+- `framerate`: `60` o `30` — solo aplica a los **menús** (también configurable en `Options > Settings > MENU FRAME RATE`); las carreras siempre van bloqueadas a 30 FPS.
+- `lod_culling`: distancia de recorte por tamaño proyectado (`7` = PC original, `6` = por defecto, `5` o `4` = recorta más objetos lejanos).
+- `lod_bias`: nivel de detalle geométrico (`0` = PC original, `1` = por defecto, `2..3` = mallas más simples antes).
+- `sd_logs`: `0` = apagado (por defecto, cero escritura de logs en la SD); `1` = activa los logs de telemetría/profiler (`profile_*.log`, `render_bottleneck_*.log`) para depuración.
 
-## Credits
+---
 
-Inspired and using tweaks by [OutRun2006Tweaks](https://github.com/emoose/OutRun2006Tweaks)
-by emoose. See `THIRD_PARTY_NOTICES.md`.
+## Controles en PS Vita
 
-OutRun is a trademark of Sega. This project is not affiliated with or endorsed by Sega or Sumo Digital.
+| Botón PS Vita | Acción |
+| :--- | :--- |
+| **Stick Izquierdo / Cruceta** | Dirección |
+| **Gatillo R** | Acelerar / Subir marcha |
+| **Gatillo L** | Frenar / Derrapar / Bajar marcha |
+| **Cruz (X)** | Confirmar / Seleccionar |
+| **Círculo (O)** | Atrás / Cancelar |
+| **Triángulo** | Cambiar cámara |
+| **Start** | Pausa / Confirmar |
+| **Select** | Mostrar/Ocultar overlay de estadísticas |
 
-This source code is be freely available for use, modification, and redistribution, subject to the licenses of the original projects it is based on.
+---
 
-Feel free to reuse any part of this project in your own work. Please give proper credit where due.
+## Cómo compilar desde código fuente (Linux / WSL)
 
-If you reuse our modifications, please keep an appropriate reference to this project and its contributors.
+### Requisitos de compilación
+- **VitaSDK** instalado (`$VITASDK` configurado en el entorno).
+- **CMake >= 3.16**, `make` y compilador `arm-vita-eabi-g++`.
+- Librerías de VitaSDK: `SDL2`, `libvorbis` / `libogg`, `vitaGL`, `vitashark`, `mathneon`, `zlib`, `pthread`.
 
-This project is developed and maintained in my free time.
+### Compilar el `.vpk` y `eboot.bin`
+```bash
+export VITASDK=/ruta/a/tu/vitasdk
+export PATH=$VITASDK/bin:$PATH
 
-If you enjoy the project and would like to support its development, donations are appreciated but entirely optional:
+cmake -S vita -B vita/build
+cmake --build vita/build -j$(nproc)
+```
 
-https://ko-fi.com/r4dius
+Los artefactos generados estarán en:
+- `vita/build/OutRun2006.vpk` (instalador completo para VitaShell)
+- `vita/build/eboot.bin` (ejecutable para actualizar instalaciones existentes en `ux0:app/OR2006C2C/eboot.bin`)
+
+*(Opcional: añade `-DOR2_VITA_HEAVY_PROFILE=ON` al comando `cmake` si deseas habilitar el conteo detallado de polígonos por modelo junto con `sd_logs=1`.)*
+
+---
+
+## Créditos y avisos legales
+
+- Basado en [`outrun2-decomp`](https://github.com/r4dius/outrun2-decomp) por **r4dius**.
+- Compilado con **VitaSDK** y **vitaGL**.
+- Este repositorio **no incluye** archivos, ejecutables ni assets con copyright de *OutRun 2006: Coast 2 Coast* (SEGA / Sumo Digital). Debes aportar tus propios archivos del juego original de PC.
+- Ver [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) para licencias de terceros.

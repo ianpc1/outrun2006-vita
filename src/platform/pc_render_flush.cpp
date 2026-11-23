@@ -8,8 +8,13 @@
 #include "system/perf.hpp"
 #include "platform/pc_pmt_records.hpp"
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <stdexcept>
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+#include "vita_profiler.hpp"
+#include "vita_job_system.hpp"
+#endif
 namespace outrun::platform {
 namespace {
 using driving::Bytes;
@@ -43,6 +48,10 @@ struct Flush {
     render_state::PixelPipeline& px;
     render_state::TransformState& tf;
     render_state::AnimationState& anim;
+    static constexpr u32 kCacheUnknown = 0xFFFFFFFFu;
+    u32 last_decl{kCacheUnknown}, last_vs{kCacheUnknown}, last_ps{kCacheUnknown};
+    u32 last_ib{kCacheUnknown}, last_vb0{kCacheUnknown}, last_stride0{kCacheUnknown};
+    u32 last_decl_size{0};
     explicit Flush(PcFlushContext& ctx):c(ctx),d(ctx.device),g(ctx.g),mc(g.material()),px(g.pixel()),tf(g.transform()),anim(g.animation()){}
 
     // 4088F0 / 408920 / 408960 and the inline Get/compare/Set copies.
@@ -176,7 +185,7 @@ struct Flush {
         const auto& p=g.pass(k);
         if(!p.enabled)return false;
         using namespace d3d9;
-        rs(RS_ALPHABLENDENABLE,p.alpha_blend);rs(RS_ZWRITEENABLE,p.z_write);rs(RS_COLORWRITEENABLE,p.colour_write);rs(RS_ALPHAREF,p.alpha_ref);
+        rs(RS_ALPHABLENDENABLE,p.alpha_blend);rs(RS_ALPHATESTENABLE,p.alpha_test);rs(RS_ZWRITEENABLE,p.z_write);rs(RS_COLORWRITEENABLE,p.colour_write);rs(RS_ALPHAREF,p.alpha_ref);
         blend_40ae80(p.colour_write,p.alpha_test,p.alpha_ref);
         return true;
     }
@@ -225,15 +234,44 @@ struct Flush {
         const auto t=driving::pc_d3dx_matrix_transpose(driving::pc_d3dx_matrix_multiply(m,render_state::load(tf.inverse_world)));
         vsc(slot*4+0x38,t.data(),4);
     }
+    static bool fast_matrix_inverse(M& inv, const M& m) {
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        // Fast path for rigid transforms (orthonormal 3x3 rotation + translation)
+        if (m[3] == 0.f && m[7] == 0.f && m[11] == 0.f && m[15] == 1.f) {
+            const float n0 = m[0]*m[0] + m[1]*m[1] + m[2]*m[2];
+            const float n1 = m[4]*m[4] + m[5]*m[5] + m[6]*m[6];
+            const float n2 = m[8]*m[8] + m[9]*m[9] + m[10]*m[10];
+            if (std::fabs(n0 - 1.f) < 1e-4f && std::fabs(n1 - 1.f) < 1e-4f && std::fabs(n2 - 1.f) < 1e-4f) {
+                const float d01 = m[0]*m[4] + m[1]*m[5] + m[2]*m[6];
+                const float d02 = m[0]*m[8] + m[1]*m[9] + m[2]*m[10];
+                const float d12 = m[4]*m[8] + m[5]*m[9] + m[6]*m[10];
+                if (std::fabs(d01) < 1e-4f && std::fabs(d02) < 1e-4f && std::fabs(d12) < 1e-4f) {
+                    inv[0] = m[0]; inv[1] = m[4]; inv[2]  = m[8];  inv[3]  = 0.f;
+                    inv[4] = m[1]; inv[5] = m[5]; inv[6]  = m[9];  inv[7]  = 0.f;
+                    inv[8] = m[2]; inv[9] = m[6]; inv[10] = m[10]; inv[11] = 0.f;
+                    const float tx = m[12], ty = m[13], tz = m[14];
+                    inv[12] = -(tx*m[0] + ty*m[1] + tz*m[2]);
+                    inv[13] = -(tx*m[4] + ty*m[5] + tz*m[6]);
+                    inv[14] = -(tx*m[8] + ty*m[9] + tz*m[10]);
+                    inv[15] = 1.f;
+                    return true;
+                }
+            }
+        }
+#endif
+        return driving::pc_d3dx_matrix_inverse(inv, m);
+    }
     // 411060: world matrix, eye and lights in object space.
     void world_411060(const M& world){
+#if !defined(OR2_VITA) && !defined(__VITA__) && !defined(__psp2__)
         OR2_PERF_ZONE("411060 world matrix");
+#endif
         render_state::store(tf.world_view,driving::pc_d3dx_matrix_multiply(world,render_state::load(tf.slot[0])));
         const auto wvp=driving::pc_d3dx_matrix_multiply(world,render_state::load(tf.view_projection));
         render_state::store(tf.world_view_projection,wvp);
         const auto wvp_t=driving::pc_d3dx_matrix_transpose(wvp);
         vsc(0x40,wvp_t.data(),4);
-        {M inv=render_state::load(tf.inverse_world);if(driving::pc_d3dx_matrix_inverse(inv,world))render_state::store(tf.inverse_world,inv);}
+        {M inv=render_state::load(tf.inverse_world);if(fast_matrix_inverse(inv,world))render_state::store(tf.inverse_world,inv);}
         const auto inv_world=render_state::load(tf.inverse_world);
         const auto eye=driving::pc_d3dx_vec3_transform_coord({f32(tf.eye[0]),f32(tf.eye[1]),f32(tf.eye[2])},inv_world);
         const Vec4 e4{eye[0],eye[1],eye[2],0.f};vsc(0x11,e4.data(),1);
@@ -298,6 +336,28 @@ struct Flush {
         vsc(0x12,m+0,1);vsc(0x13,m+4,1);vsc(0x14,m+12,1);
         // Stack vector [esp+0xC..0x18]: w = power bits; xyz from the last lit light.
         Vec4 v=g.stack_410dd0;v[3]=m[16];
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        for(std::int32_t k=4;k>=0;--k){
+            if(!tf.light_enabled[k])continue;
+            const auto& l=tf.light[k];
+            v[0]=f32(l.specular[0])*m[8];v[1]=m[9]*f32(l.specular[1]);v[2]=f32(l.specular[2])*m[10];
+            vsc(0x20+u32(k),v.data(),1);
+        }
+        g.stack_410dd0=v;
+        if(ambient_pass){
+            const auto& l0=tf.light[0];
+            const Vec4 v1{f32(l0.diffuse[0])*m[0],f32(l0.diffuse[1])*m[1],f32(l0.diffuse[2])*m[2],m[3]};
+            const Vec4 v2{f32(tf.ambient_lit[0])*m[4]+m[12],f32(tf.ambient_lit[1])*m[5]+m[13],
+                          f32(tf.ambient_lit[2])*m[6]+m[14],0.f};
+            d.set_pixel_shader_constant_f(0,v1.data(),1);
+            d.set_pixel_shader_constant_f(1,v2.data(),1);
+            d.set_pixel_shader_constant_f(2,v.data(),1);
+        }
+        const float alpha=((m[17]+1.0f)*0.25f)*f32(px.alpha_scale)*255.0f;
+        std::int32_t a8i = std::int32_t(std::lrintf(alpha));
+        u32 a8 = (a8i < 1) ? 1u : (a8i > 255 ? 255u : u32(a8i));
+        combiner_constants_40b4b0(0,4,a8<<24);
+#else
         for(std::int32_t k=4;k>=0;--k){
             if(!tf.light_enabled[k])continue;
             const auto& l=tf.light[k];
@@ -318,6 +378,7 @@ struct Flush {
         u32 a8=u32(ftol(alpha));
         if(a8<1u)a8=1;else if(a8>0xffu)a8=0xff;
         combiner_constants_40b4b0(0,4,a8<<24);
+#endif
     }
     // Light API 410740 / 410710 / 4107A0 (410810 directional, 4109C0 spot,
     // 410B90 point); desc is the 0x94-byte light record: +00 enabled,
@@ -440,7 +501,11 @@ struct Flush {
     void combiner_block_40b0c0(bool skip_final){
         auto& b=px.block;
         // Slot arrays of the block, unbounded as on the PC (see pipeline_word).
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        auto at=[&](u32 (&array)[9],u32 slot)->u32&{return (slot<9u)?array[slot]:pipeline_word(array,slot);};
+#else
         auto at=[&](u32 (&array)[9],u32 slot)->u32&{return pipeline_word(array,slot);};
+#endif
         u32 slot=0;
         for(u32 s=0;s<5;++s){
             if(skip_final&&s==4u)continue;
@@ -481,7 +546,18 @@ struct Flush {
         std::memcpy(block.data(),&px.block,0x108);
         // A block hashed recently: its Adler-32 (the draws reuse a few blocks).
         u32 hash=0;bool known=false;
-        for(const auto& b:g.ps_blocks)if(b.valid&&b.block==block){hash=b.hash;known=true;break;}
+        const u32 key_slots = px.block.slots;
+        const u32 key_bound = px.block.bound_mask;
+        for(const auto& b:g.ps_blocks){
+            if(!b.valid)continue;
+            // Fast 8-byte pre-filter on slots + bound_mask before 264-byte compare
+            u32 b_slots, b_bound;
+            std::memcpy(&b_slots, b.block.data() + offsetof(render_state::CombinerBlock, slots), 4);
+            std::memcpy(&b_bound, b.block.data() + offsetof(render_state::CombinerBlock, bound_mask), 4);
+            if(b_slots==key_slots && b_bound==key_bound && std::memcmp(b.block.data(),block.data(),0x108)==0){
+                hash=b.hash;known=true;break;
+            }
+        }
         if(!known){
             hash=pc_adler32_43a6f0(block.data(),0x108);
             auto& b=g.ps_blocks[g.ps_block_next];g.ps_block_next=(g.ps_block_next+1u)%u32(g.ps_blocks.size());
@@ -516,7 +592,8 @@ struct Flush {
             if(px.dirty){
                 combiner_block_40b0c0(skip_final);
                 pixel_shader_40b200();
-                d.set_pixel_shader(g.shader().pixel_shader);
+                const u32 ps = g.shader().pixel_shader;
+                if(ps != last_ps){ last_ps = ps; d.set_pixel_shader(ps); }
                 light_colours_410d00(true);
                 px.applied_mode=px.mode;px.dirty=0;
             }
@@ -526,7 +603,8 @@ struct Flush {
             return;
         }
         if(px.applied_mode==px.mode)return;
-        d.set_pixel_shader(pipeline_word(px.fixed_shader,px.mode));
+        const u32 fps = pipeline_word(px.fixed_shader,px.mode);
+        if(fps != last_ps){ last_ps = fps; d.set_pixel_shader(fps); }
         light_colours_410d00(false);
         const auto previous=px.applied_mode;
         if((previous==0u||previous==0xcu)&&px.alpha_test){rs(RS_COLORWRITEENABLE,px.colour_write_rgb);rs(RS_ALPHAREF,px.alpha_ref);}
@@ -665,7 +743,9 @@ struct Flush {
     // 408C80: material of one draw (render states, three texture layers,
     // colours, then the pixel pipeline).
     void material_408c80(const DrawEntry& e,const PcPmtResources& bank,u32 material_offset){
+#if !defined(OR2_VITA) && !defined(__VITA__) && !defined(__psp2__)
         OR2_PERF_ZONE("408C80 material");
+#endif
         const auto mat=pmt<PmtMaterial>(bank.system,material_offset);
         if(!bank.texture_table_24)throw std::runtime_error("408C80 bank without texture table (uninitialised on the PC)");
         if(const auto changed=mc.material_flags^mat.flags){
@@ -725,8 +805,8 @@ struct Flush {
     }
     // 410680: declaration and vertex shader of a material.
     void shader_410680(const PmtShaderRecord& r){
-        d.set_vertex_declaration(r.declaration);
-        d.set_vertex_shader(r.vertex_shader);
+        if(last_decl != r.declaration){ last_decl = r.declaration; last_decl_size = 0; d.set_vertex_declaration(r.declaration); }
+        if(last_vs != r.vertex_shader){ last_vs = r.vertex_shader; d.set_vertex_shader(r.vertex_shader); }
         if(r.keeps_light_state)return;
         anim.unknown_89ede8=0;anim.unknown_89ede0[0]=0;
         if(anim.specular_request!=0u)anim.specular_request=0;
@@ -748,7 +828,11 @@ struct Flush {
     }
     // 404700: vertex size of a declaration (offset + size of its last element).
     u32 declaration_size(u32 decl){
-        if(const auto it=g.declaration_sizes.find(decl);it!=g.declaration_sizes.end())return it->second;
+        if(decl == last_decl && last_decl_size != 0u) return last_decl_size;
+        if(const auto it=g.declaration_sizes.find(decl);it!=g.declaration_sizes.end()){
+            if(decl == last_decl) last_decl_size = it->second;
+            return it->second;
+        }
         std::array<PcVertexElement,PcMaxFvfDeclSize> el{};
         const auto count=d.get_declaration(decl,el.data());
         if(count<2u||count>PcMaxFvfDeclSize)throw std::runtime_error("404700 declaration without elements");
@@ -756,41 +840,57 @@ struct Flush {
         u32 size=last.offset;
         switch(last.type){case 0:size+=4;break;case 1:size+=8;break;case 2:case 4:size+=12;break;default:break;}
         g.declaration_sizes.emplace(decl,size);
+        if(decl == last_decl) last_decl_size = size;
         return size;
     }
     // 404700: draw one queue entry (each primitive of its mesh, each draw
     // record of the entry's pass).
     void draw_404700(const DrawEntry& e,const PcPmtResources& bank){
+#if !defined(OR2_VITA) && !defined(__VITA__) && !defined(__psp2__)
         OR2_PERF_ZONE("404700 draw entry");
+#endif
         using namespace d3d9;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        outrun::vita_profile::set_active_model(e.resource, (e.object >= 0x18u) ? ((e.object - 0x18u) / 0x3cu) : 0u);
+#endif
         const auto& sys=bank.system;
         const auto obj=pmt<PmtObject>(sys,e.object);
         const auto mesh=pmt<PmtMesh>(sys,e.mesh);
         if(e.flags&1u)rs(RS_CULLMODE,CULL_CCW);
         for(std::int32_t i=0;i<mesh.primitives;++i){
             const auto prim=pmt<PmtPrimitive>(sys,obj.primitives+(mesh.first_primitive+u32(i))*0x14u);
+            if(prim.draws[e.pass]<=0)continue;
             const auto group=pmt<PmtGroup>(sys,obj.groups+prim.group*0x2cu);
             const auto index_buffer=pmt_u32(sys,obj.index_buffers+prim.group*4u);
             const auto stride=group.stride;
             const auto vbs=obj.vertex_buffers+prim.group*16u;
             if(e.morph_target){   // 405450 morph: stream 1 = the target object's buffer of the group
                 const auto target=pmt<PmtObject>(sys,e.morph_target);
-                d.set_stream_source(0,pmt_u32(sys,vbs),0,stride);
+                const auto vb0=pmt_u32(sys,vbs);
+                d.set_stream_source(0,vb0,0,stride);
+                last_vb0=vb0; last_stride0=stride;
                 d.set_stream_source(1,pmt_u32(sys,target.vertex_buffers+prim.group*16u),0,stride);
-            }else if(group.frames<=1)d.set_stream_source(0,pmt_u32(sys,vbs),0,stride);
-            else{                 // animated vertices: frames k and k+1 of 40ECC0
+            }else if(group.frames<=1){
+                const auto vb0=pmt_u32(sys,vbs);
+                if(last_vb0!=vb0 || last_stride0!=stride){
+                    d.set_stream_source(0,vb0,0,stride);
+                    last_vb0=vb0; last_stride0=stride;
+                }
+            }else{                 // animated vertices: frames k and k+1 of 40ECC0
                 u32 k=anim.frame;
                 if(k>=u32(group.frames))k%=u32(group.frames);
                 u32 k1=k+1u;if(k1>=u32(group.frames))k1=0;
-                d.set_stream_source(0,pmt_u32(sys,vbs+k*4u),0,stride);
+                const auto vb0=pmt_u32(sys,vbs+k*4u);
+                d.set_stream_source(0,vb0,0,stride);
+                last_vb0=vb0; last_stride0=stride;
                 d.set_stream_source(1,pmt_u32(sys,vbs+k1*4u),0,stride);
             }
+            if(last_ib!=index_buffer){ last_ib=index_buffer; d.set_indices(index_buffer); }
             for(std::int32_t k=0;k<prim.draws[e.pass];++k){
                 const auto dr=pmt<PmtDraw>(sys,obj.draws+(prim.first_draw[e.pass]+u32(k))*0x20u);
                 const auto shader=shader_record(sys,obj,dr.material,prim.group);
-                const auto size=declaration_size(shader.declaration);
                 shader_410680(shader);
-                d.set_indices(index_buffer);
+                const auto size=declaration_size(shader.declaration);
                 material_408c80(e,bank,obj.materials+dr.material*0x58u);
                 if(stride!=size)continue;   // vertex layout the stream cannot feed: skipped as on the PC
                 const auto range=pmt<PmtRange>(sys,obj.ranges+dr.range*16u);
@@ -809,6 +909,92 @@ struct Flush {
         if(k.index>=q.matrices.size())throw std::out_of_range("405890 matrix pool");
         M m{};std::memcpy(m.data(),q.matrices[k.index].data(),64);return m;
     }
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    struct PrecomputedWorld {
+        M world_view;
+        M wvp;
+        M wvp_t;
+        M inv_world;
+        bool inv_ok;
+        Vec4 eye_obj;
+        Vec4 light_dir[5];
+        Vec4 light_pos[5];
+    };
+    struct PrecomputeWorldBatch {
+        const std::array<std::uint8_t, 64>* matrices;
+        M view;
+        M view_proj;
+        std::array<float, 3> eye;
+        bool light_enabled[5];
+        u32 light_type[5];
+        std::array<float, 3> light_dir[5];
+        std::array<float, 3> light_pos[5];
+        PrecomputedWorld* out;
+    };
+    static void precompute_world_worker(std::uint32_t begin, std::uint32_t end, std::uint32_t /*worker_idx*/, void* user_data) {
+        const auto* b = static_cast<const PrecomputeWorldBatch*>(user_data);
+        for (std::uint32_t i = begin; i < end; ++i) {
+            M world{};
+            std::memcpy(world.data(), b->matrices[i].data(), 64);
+            auto& dst = b->out[i];
+            dst.world_view = driving::pc_d3dx_matrix_multiply(world, b->view);
+            dst.wvp = driving::pc_d3dx_matrix_multiply(world, b->view_proj);
+            dst.wvp_t = driving::pc_d3dx_matrix_transpose(dst.wvp);
+            M inv{};
+            dst.inv_ok = fast_matrix_inverse(inv, world);
+            if (dst.inv_ok) {
+                dst.inv_world = inv;
+                const auto e = driving::pc_d3dx_vec3_transform_coord(b->eye, inv);
+                dst.eye_obj = {e[0], e[1], e[2], 0.f};
+                for (u32 k = 0; k < 5; ++k) {
+                    if (!b->light_enabled[k]) continue;
+                    if (b->light_type[k] != 1u) {
+                        auto d = driving::pc_d3dx_vec3_transform_normal(b->light_dir[k], inv);
+                        d = driving::pc_d3dx_vec3_normalize(d);
+                        dst.light_dir[k] = {d[0], d[1], d[2], 0.f};
+                    }
+                    if (b->light_type[k] != 3u) {
+                        const auto p = driving::pc_d3dx_vec3_transform_coord(b->light_pos[k], inv);
+                        dst.light_pos[k] = {p[0], p[1], p[2], 0.f};
+                    }
+                }
+            }
+        }
+    }
+    void apply_precomputed_world(const PrecomputedWorld& pw) {
+        render_state::store(tf.world_view, pw.world_view);
+        render_state::store(tf.world_view_projection, pw.wvp);
+        vsc(0x40, pw.wvp_t.data(), 4);
+        if (pw.inv_ok) {
+            render_state::store(tf.inverse_world, pw.inv_world);
+            vsc(0x11, pw.eye_obj.data(), 1);
+            for (u32 k = 0; k < 5; ++k) {
+                if (!tf.light_enabled[k]) continue;
+                const auto& l = tf.light[k];
+                if (l.type != 1u) vsc(0x25 + k, pw.light_dir[k].data(), 1);
+                if (l.type != 3u) vsc(0x27 + k, pw.light_pos[k].data(), 1);
+            }
+        } else {
+            const auto inv_world = render_state::load(tf.inverse_world);
+            const auto eye = driving::pc_d3dx_vec3_transform_coord({f32(tf.eye[0]), f32(tf.eye[1]), f32(tf.eye[2])}, inv_world);
+            const Vec4 e4{eye[0], eye[1], eye[2], 0.f}; vsc(0x11, e4.data(), 1);
+            for (u32 k = 0; k < 5; ++k) {
+                if (!tf.light_enabled[k]) continue;
+                const auto& l = tf.light[k];
+                if (l.type != 1u) {
+                    auto dir = driving::pc_d3dx_vec3_transform_normal({f32(l.direction[0]), f32(l.direction[1]), f32(l.direction[2])}, inv_world);
+                    dir = driving::pc_d3dx_vec3_normalize(dir);
+                    const Vec4 v{dir[0], dir[1], dir[2], 0.f}; vsc(0x25 + k, v.data(), 1);
+                }
+                if (l.type != 3u) {
+                    const auto pos = driving::pc_d3dx_vec3_transform_coord({f32(l.position[0]), f32(l.position[1]), f32(l.position[2])}, inv_world);
+                    const Vec4 v{pos[0], pos[1], pos[2], 0.f}; vsc(0x27 + k, v.data(), 1);
+                }
+            }
+        }
+        for (u32 s = 0; s < 4; ++s) if (tf.texture_matrix_eye[s]) texture_matrix_411230(tf.texture_matrix_mode[s], s);
+    }
+#endif
     void flush(PcRenderQueue& q,const std::vector<u32>& order){
         const std::int32_t count=std::int32_t(q.count);
         if(count<=0)return;
@@ -818,13 +1004,46 @@ struct Flush {
         std::array<MatrixKey,64> last{};
         std::int32_t valid=0;
         begin_408af0();
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+        static std::vector<PrecomputedWorld> s_precomp;
+        u32 precomp_count = 0;
+        if (q.matrix_count >= 12u && q.matrix_count <= q.matrices.size() && outrun::vita_jobs::is_initialized()) {
+            precomp_count = q.matrix_count;
+            if (s_precomp.size() < precomp_count) s_precomp.resize(precomp_count);
+            PrecomputeWorldBatch batch{};
+            batch.matrices = q.matrices.data();
+            batch.view = render_state::load(tf.slot[0]);
+            batch.view_proj = render_state::load(tf.view_projection);
+            batch.eye = {f32(tf.eye[0]), f32(tf.eye[1]), f32(tf.eye[2])};
+            for (u32 k = 0; k < 5; ++k) {
+                batch.light_enabled[k] = (tf.light_enabled[k] != 0);
+                batch.light_type[k] = tf.light[k].type;
+                batch.light_dir[k] = {f32(tf.light[k].direction[0]), f32(tf.light[k].direction[1]), f32(tf.light[k].direction[2])};
+                batch.light_pos[k] = {f32(tf.light[k].position[0]), f32(tf.light[k].position[1]), f32(tf.light[k].position[2])};
+            }
+            batch.out = s_precomp.data();
+            outrun::vita_jobs::parallel_for(precomp_count, 4u, precompute_world_worker, &batch);
+        }
+#endif
         auto load_matrices=[&](const DrawEntry& e){
+#if !defined(OR2_VITA) && !defined(__VITA__) && !defined(__psp2__)
             OR2_PERF_ZONE("405890 matrices");
+#endif
             const MatrixKey world{tag,e.matrix};
             if(!(last[0]==world)){
                 const auto a=matrix_of(q,last[0]),b=matrix_of(q,world);
                 if(std::memcmp(a.data(),b.data(),64)!=0){
-                    render_state::store(tf.slot[6],b);world_411060(b);last[0]=world;valid=0;
+                    render_state::store(tf.slot[6],b);
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+                    if (world.index < precomp_count) {
+                        apply_precomputed_world(s_precomp[world.index]);
+                    } else {
+                        world_411060(b);
+                    }
+#else
+                    world_411060(b);
+#endif
+                    last[0]=world;valid=0;
                 }
             }
             const std::int32_t n=std::int32_t(e.palette_count);
@@ -969,7 +1188,8 @@ void render_environment_matrix_4089a0(PcFlushContext& c,std::int32_t env,const s
 }
 void render_queue_flush_4052c0(PcFlushContext& fc,PcRenderContext& rc){
     OR2_PERF_ZONE("4052C0 opaque flush");
-    std::vector<std::uint32_t> order(rc.opaque.count);
+    static std::vector<std::uint32_t> order;
+    order.resize(rc.opaque.count);
     for(std::uint32_t k=0;k<rc.opaque.count;++k)order[k]=k;
     render_queue_flush_405890(fc,rc.opaque,order);
     for(auto it=rc.opaque.undo.rbegin();it!=rc.opaque.undo.rend();++it){

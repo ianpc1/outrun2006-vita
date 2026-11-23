@@ -66,7 +66,47 @@ void drain_sounds(NativeRuntimeContext& c,NativeRaceHudRuntime& o){
 // ---- NAVI memory -----------------------------------------------------------------
 void map_word(PcRaceMemory& m,std::uint32_t a,void* p,std::size_t n){m.map(a,static_cast<std::uint8_t*>(p),n);}
 void rebuild(NativeRuntimeContext& c,NativeRaceHudRuntime& o){
-    auto& m=o.memory;m.clear();
+    auto& m=o.memory;
+#if defined(OR2_VITA) || defined(__VITA__) || defined(__psp2__)
+    // Structural fast-path: keep o.memory + 64-entry TLB warm across 4BCC40 and 4BEB00.
+    const auto& area_regs = c.race_area ? native_race_area_memory(c, nullptr, false).regions() : m.regions();
+    auto& area_ref = native_race_area(c);
+    auto& cs_ref = c.event_function36.car_select;
+    std::uint32_t car_params_tok = 0;
+    const std::uint32_t car_tok = c.event_state.slots[8].work_token;
+    if (car_tok) std::memcpy(&car_params_tok, cs_ref.car_799d18.data() + 0x2b4, 4);
+    std::uint64_t hsig = std::uint64_t(c.race_area ? area_regs.size() : 0u)
+        ^ (std::uint64_t(car_tok) << 16)
+        ^ (std::uint64_t(c.event_state.slots[385].work_token) << 32)
+        ^ (std::uint64_t(car_params_tok) << 4)
+        ^ (c.race_ghosts ? 0x100000ull : 0ull)
+        ^ reinterpret_cast<std::uintptr_t>(area_ref.table)
+        ^ reinterpret_cast<std::uintptr_t>(c.mission.racers.racers_80fb00.data())
+        ^ reinterpret_cast<std::uintptr_t>((c.race_area && !area_regs.empty()) ? area_regs.back().data : nullptr)
+        ^ reinterpret_cast<std::uintptr_t>(&o);
+    static std::uint64_t s_last_hud_sig = 0;
+    if (hsig == s_last_hud_sig && !m.regions().empty()) {
+        auto& mr = o.mirrors;
+        mr[0] = c.start_mode.course_preset; mr[1] = c.game_mode.game_variant; mr[2] = c.mode_state.current;
+        mr[3] = HudRacersBase; mr[4] = HudRankBase;
+        const auto& mission = c.mission.manager;
+        const auto* races = c.start_mode.scene_owner_race_assets;
+        mr[5] = (mission.record_83637c >= 0 && races) ? NativeRacesBlobBase + std::uint32_t(races->races_offset) + std::uint32_t(mission.record_83637c) * 0x44u : 0u;
+        mr[6] = c.start_mode.selection_active_836374 ? 1u : 0u;
+        Bytes rec(o.event_records_799b30.data(), o.event_records_799b30.size());
+        for (std::uint32_t id = 0; id < 410u; ++id) {
+            const auto& s = c.event_state.slots[id]; const auto b = id * 0x3cu;
+            rec.put32(b, s.descriptor_token); rec.put32(b + 4, s.event_id); rec.put32(b + 8, s.work_token); rec.put32(b + 0xc, s.display_scene);
+            rec.put32(b + 0x10, s.init_callback); rec.put32(b + 0x14, s.ctrl_callback); rec.put32(b + 0x18, s.disp_callback); rec.put32(b + 0x1c, s.shadow_callback);
+            rec.put32(b + 0x20, s.dest_callback); rec.put32(b + 0x24, s.aux24); rec.put32(b + 0x28, s.aux28); rec.put32(b + 0x2c, s.close_guard);
+            rec.put32(b + 0x30, s.function_id); rec.put32(b + 0x34, s.aux34); rec.put32(b + 0x38, s.aux38);
+            o.event_flags_79fb48[id] = s.flags;
+        }
+        return;
+    }
+    s_last_hud_sig = hsig;
+#endif
+    m.clear();
     for(std::size_t i=0;i<EmbeddedExeRangeCount;++i)m.map_const(EmbeddedExeRanges[i].base,EmbeddedExeRanges[i].data,EmbeddedExeRanges[i].size);
     // The AREA module's memory (course tables 6A54E0.. for 44C990), shadowed by what follows.
     if(c.race_area)for(const auto& r:native_race_area_memory(c,nullptr,true).regions()){if(r.writable)m.map(r.base,r.data,r.size);else m.map_const(r.base,r.data,r.size);}
@@ -443,6 +483,8 @@ bool native_race_hud_display(NativeRuntimeContext& c,PcSceneRenderer& r,std::uin
             queue_unmarked_glyphs(c,device,draws,glyphs);
             break;}
         case 0x4998c0u:{
+            // In active race (mode 16) and modes 14/15/17, gad_display_4998c0 is a pure RET.
+            if(c.mode_state.current>=14u&&c.mode_state.current<=17u)break;
             // race_end_modes gad_display_4998c0: its 429530 draws are resolved
             // through 428A10 and executed like the NAVI ones.
             ++o.gad_displays;std::uint32_t missing{};
