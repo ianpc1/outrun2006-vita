@@ -49,12 +49,25 @@ bool present_frame(RendererImpl& r){
 #endif
         if(!r.start_loading_visible&&r.scene){
             r.device->clear(3u,0xff000000u,1.0f,0u);
+#if defined(OR2_VITA_GL)
+            // Draw title movie behind PC 2D sprites (PRESS START) and upload texture only when dirty.
+            const bool drew_movie_bg = (r.movie_visible && !r.movie_rgba.empty() && r.display);
+            if(drew_movie_bg){
+                constexpr auto mw=FramebufferHeight*4u/3u,mx=(FramebufferWidth-mw)/2u;
+                r.display->rgba(&r.movie_rgba,r.movie_rgba.data(),r.movie_width,r.movie_height,int(mx),0,int(mw),int(FramebufferHeight),r.movie_dirty);
+                r.movie_dirty=false;
+            }
+            r.device->preserve_color_on_clear = drew_movie_bg;
+#endif
             try{
                 r.scene(*r.device);
             }catch(const std::exception& e){
                 std::fprintf(stderr,"PS5 scene error: %s\n",e.what());
                 r.last_error=e.what();
             }
+#if defined(OR2_VITA_GL)
+            r.device->preserve_color_on_clear = false;
+#endif
             if(!r.device->errors.empty()){
                 std::fprintf(stderr,"PS5 device error: %s\n",r.device->errors.back().c_str());
                 r.device->errors.clear();
@@ -134,7 +147,14 @@ bool present_frame(RendererImpl& r){
 #endif
             // The title movie stays 4:3 in a 16:9 frame.
             constexpr auto mw=FramebufferHeight*4u/3u,mx=(FramebufferWidth-mw)/2u;
+#if defined(OR2_VITA_GL)
+            if(!r.scene&&r.movie_visible&&!r.movie_rgba.empty()){
+                display.rgba(&r.movie_rgba,r.movie_rgba.data(),r.movie_width,r.movie_height,int(mx),0,int(mw),int(FramebufferHeight),r.movie_dirty);
+                r.movie_dirty=false;
+            }
+#else
             if(r.movie_visible&&!r.movie_rgba.empty())display.rgba(&r.movie_rgba,r.movie_rgba.data(),r.movie_width,r.movie_height,int(mx),0,int(mw),int(FramebufferHeight));
+#endif
             if(r.frontend_visible){
                 if(r.frontend_sprites)paint_frontend(r,display,r.stats.frames);
                 else for(const auto& d:r.frontend_frame_draws){const auto slot=frontend_texture_slot(r.frontend,d.texture);

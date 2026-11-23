@@ -201,10 +201,11 @@ void VitaGlDisplay::quad(const std::array<platform::MeshPreviewVertex, 4>& verti
 }
 
 void VitaGlDisplay::rgba(const void* key, const std::uint8_t* bytes,
-                         unsigned width, unsigned height, int x, int y, int dst_w, int dst_h) {
+                         unsigned width, unsigned height, int x, int y, int dst_w, int dst_h,
+                         bool update) {
     if (!bytes || !width || !height || dst_w <= 0 || dst_h <= 0) return;
     outrun::vita_render::run_sync([&]() {
-    unsigned tex = upload(key, bytes, width, height, true);
+    unsigned tex = upload(key, bytes, width, height, update);
     if (!tex) return;
 
     glDisable(GL_DEPTH_TEST);

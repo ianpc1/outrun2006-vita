@@ -55,7 +55,12 @@ platform::NativeInputState DualSenseInput::update(const PadSample& p,std::uint32
     if(!in_race){if(down&L1)f|=0x10u;if(down&R1)f|=0x20u;}
     if(down&Square)f|=0x8000u|0x40000u;
     if(down&Triangle)f|=0x4000u;
+#if defined(__VITA__) || defined(__psp2__) || defined(OR2_VITA)
+    // PS Vita has no L2/R2: map L1/R1 to class/page triggers (0x1000/0x2000) and Triangle to car colour / random music (0x10).
+    out.frontend.device_held=((down&(L1|L2))?0x1000u:0u)|((down&(R1|R2))?0x2000u:0u)|((held&Triangle)?0x10u:0u);
+#else
     out.frontend.device_held=((down&L2)?0x1000u:0u)|((down&R2)?0x2000u:0u);
+#endif
     auto& d=out.pc_device;
     d.axes_94[0x0e]=axis_word(p.left_x);
     d.axes_94[0x0d]=std::int16_t(out.accelerator);

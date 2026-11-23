@@ -318,6 +318,7 @@ struct RendererImpl {
     bool video_pending{},video_fxaa{};       // Options > Settings enhancement rows (ps5_renderer_set_video)
     unsigned video_width{},video_height{},video_msaa{1};
     bool movie_visible{};
+    bool movie_dirty{};
     bool start_loading_visible{};
     std::uint32_t primary_frontend_scenes{};
     std::uint32_t primary_frontend_textures{};
@@ -387,8 +388,8 @@ void ps5_renderer_scene_to_frame(Ps5Renderer& renderer){
 }
 bool ps5_renderer_set_frontend_visible(Ps5Renderer& renderer,bool visible){auto* impl=static_cast<RendererImpl*>(renderer.impl);if(!impl)return false;impl->frontend_visible=visible;return true;}
 bool ps5_renderer_set_movie_frame(Ps5Renderer& renderer,const std::uint8_t* rgba,unsigned width,unsigned height){auto* r=static_cast<RendererImpl*>(renderer.impl);if(!r)return false;if(rgba&&(width==0u||height==0u||width>1920u||height>1080u))return false;r->movie_visible=rgba!=nullptr;
-    if(rgba){r->movie_rgba.assign(rgba,rgba+std::size_t(width)*height*4u);r->movie_width=width;r->movie_height=height;}
-    else{r->movie_rgba.clear();r->movie_width=r->movie_height=0;}
+    if(rgba){r->movie_rgba.assign(rgba,rgba+std::size_t(width)*height*4u);r->movie_width=width;r->movie_height=height;r->movie_dirty=true;}
+    else{r->movie_rgba.clear();r->movie_width=r->movie_height=0;r->movie_dirty=false;}
     return true;}
 bool ps5_renderer_set_start_loading_visible(Ps5Renderer& renderer,bool visible){auto* impl=static_cast<RendererImpl*>(renderer.impl);if(!impl||(visible&&impl->stats.loading_scenes==0u))return false;impl->start_loading_visible=visible;return true;}
 bool ps5_renderer_set_start_loading_scene(Ps5Renderer& renderer,std::uint32_t scene){auto* impl=static_cast<RendererImpl*>(renderer.impl);if(!impl||scene>=impl->stats.loading_scenes)return false;if(impl->loading_scene_offset!=scene)impl->loading_frame=0;impl->loading_scene_offset=scene;return true;}

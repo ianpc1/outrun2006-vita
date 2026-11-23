@@ -800,7 +800,7 @@ void VitaGlD3D9Device::clear_gl(std::uint32_t flags, std::uint32_t colour, float
     glClearStencil(int(stencil));
 
     GLbitfield mask = 0;
-    if (flags & 1) mask |= GL_COLOR_BUFFER_BIT;
+    if ((flags & 1) && !preserve_color_on_clear) mask |= GL_COLOR_BUFFER_BIT;
     if (flags & 2) mask |= GL_DEPTH_BUFFER_BIT;
     if (flags & 4) mask |= GL_STENCIL_BUFFER_BIT;
     if (mask) glClear(mask);

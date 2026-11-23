@@ -124,10 +124,115 @@ bool TitleMovie::advance(double elapsed,std::string& error){
 }
 }
 #else
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#if defined(OR2_HAVE_VORBIS)
+#include <vorbis/vorbisfile.h>
+#endif
 namespace outrun::platform {
-TitleMovie::~TitleMovie()=default;
-void TitleMovie::close(){impl_=nullptr;pixels_.clear();audio_.clear();width_=height_=0u;decoded_=audio_frames_=0u;has_audio_=false;}
-bool TitleMovie::open(const std::string&,std::string& error){error="FFmpeg support not compiled";return false;}
-bool TitleMovie::advance(double,std::string& error){error="FFmpeg support not compiled";return false;}
+namespace {
+struct StaticMovie {
+#if defined(OR2_HAVE_VORBIS)
+    OggVorbis_File vf{};
+    bool ogg_open{};
+    ~StaticMovie(){if(ogg_open)ov_clear(&vf);}
+#endif
+};
+std::uint16_t rd16(const std::uint8_t* p){return std::uint16_t(p[0]|(std::uint16_t(p[1])<<8));}
+std::uint32_t rd32(const std::uint8_t* p){return std::uint32_t(p[0])|(std::uint32_t(p[1])<<8)|(std::uint32_t(p[2])<<16)|(std::uint32_t(p[3])<<24);}
+std::string sibling_ext(const std::string& path,const char* ext){
+    const auto dot=path.find_last_of('.');
+    const auto slash=path.find_last_of("/\\");
+    if(dot!=std::string::npos&&(slash==std::string::npos||dot>slash))return path.substr(0,dot)+ext;
+    return path+ext;
+}
+}
+TitleMovie::~TitleMovie(){close();}
+void TitleMovie::close(){delete static_cast<StaticMovie*>(impl_);impl_=nullptr;pixels_.clear();audio_.clear();width_=height_=0u;decoded_=audio_frames_=0u;has_audio_=false;}
+bool TitleMovie::open(const std::string& path,std::string& error){
+    close();error.clear();
+    // Static fallback frame (mv/TitleScreen.bmp) + optional Ogg Vorbis audio (mv/TitleScreen.ogg)
+    const std::string bmp_path=sibling_ext(path,".bmp");
+    std::FILE* f=std::fopen(bmp_path.c_str(),"rb");
+    if(!f){error="title image not found ("+bmp_path+")";return false;}
+    std::uint8_t hdr[54]{};
+    if(std::fread(hdr,1,sizeof hdr,f)!=sizeof hdr||hdr[0]!='B'||hdr[1]!='M'){std::fclose(f);error="invalid title BMP header";return false;}
+    const std::uint32_t data_off=rd32(hdr+10);
+    const std::int32_t w=static_cast<std::int32_t>(rd32(hdr+18));
+    const std::int32_t h_signed=static_cast<std::int32_t>(rd32(hdr+22));
+    const std::uint16_t bpp=rd16(hdr+28);
+    const std::uint32_t comp=rd32(hdr+30);
+    const bool top_down=h_signed<0;
+    const std::int32_t h=top_down?-h_signed:h_signed;
+    if(w<=0||h<=0||w>1920||h>1080||(bpp!=24u&&bpp!=32u)||(comp!=0u&&comp!=3u)||data_off<54u){
+        std::fclose(f);error="unsupported title BMP format";return false;
+    }
+    const std::size_t bytes_pp=bpp/8u;
+    const std::size_t row_stride=(std::size_t(w)*bytes_pp+3u)&~std::size_t(3u);
+    if(std::fseek(f,static_cast<long>(data_off),SEEK_SET)!=0){std::fclose(f);error="title BMP seek failed";return false;}
+    std::vector<std::uint8_t> row(row_stride);
+    pixels_.resize(std::size_t(w)*std::size_t(h)*4u);
+    for(std::int32_t y=0;y<h;++y){
+        if(std::fread(row.data(),1,row_stride,f)!=row_stride){std::fclose(f);close();error="truncated title BMP";return false;}
+        const std::size_t dst_y=top_down?std::size_t(y):std::size_t(h-1-y);
+        std::uint8_t* dst=pixels_.data()+dst_y*std::size_t(w)*4u;
+        for(std::int32_t x=0;x<w;++x){
+            const std::uint8_t* src=row.data()+std::size_t(x)*bytes_pp;
+            dst[x*4+0]=src[2];
+            dst[x*4+1]=src[1];
+            dst[x*4+2]=src[0];
+            dst[x*4+3]=255u;
+        }
+    }
+    std::fclose(f);
+    auto* st=new StaticMovie;
+#if defined(OR2_HAVE_VORBIS)
+    const std::string ogg_path=sibling_ext(path,".ogg");
+    if(ov_fopen(ogg_path.c_str(),&st->vf)==0){
+        const vorbis_info* vi=ov_info(&st->vf,-1);
+        if(vi&&vi->rate==48000&&vi->channels==2){st->ogg_open=true;has_audio_=true;}
+        else ov_clear(&st->vf);
+    }
+#endif
+    width_=unsigned(w);height_=unsigned(h);decoded_=1u;impl_=st;
+    return true;
+}
+bool TitleMovie::advance(double elapsed,std::string& error){
+    error.clear();
+    auto* st=static_cast<StaticMovie*>(impl_);
+    if(!st)return false;
+#if defined(OR2_HAVE_VORBIS)
+    if(st->ogg_open&&std::isfinite(elapsed)&&elapsed>=0.0&&elapsed<=86400.0){
+        const std::uint64_t target=std::uint64_t(elapsed*48000.0)+4800u;
+        // Cap per-tick decode so MenuAudio::queue_movie (max 192000 samples) never overflows.
+        const std::uint64_t want=target>audio_frames_?std::min<std::uint64_t>(target-audio_frames_,16000u):0u;
+        std::uint64_t got=0u;
+        int section=0;
+        unsigned rewinds=0u;
+        char buf[4096];
+        while(got<want&&audio_.size()+2048u<=96000u){
+            const int req=int(std::min<std::uint64_t>((want-got)*4u,sizeof buf))&~3;
+            if(req<4)break;
+            const long n=ov_read(&st->vf,buf,req,0,2,1,&section);
+            if(n==0){
+                if(++rewinds>1u)break;
+                if(ov_pcm_seek(&st->vf,0)!=0)break;
+                continue;
+            }
+            if(n<0)continue;
+            const std::size_t frames=std::size_t(n)/4u;
+            const std::size_t base=audio_.size();
+            audio_.resize(base+frames*2u);
+            std::memcpy(audio_.data()+base,buf,frames*4u);
+            got+=frames;
+            audio_frames_+=frames;
+        }
+    }
+#else
+    (void)elapsed;
+#endif
+    return true;
+}
 }
 #endif

@@ -40,6 +40,8 @@ public:
     void end_frame();
     void begin_async_frame();
     void submit_async_frame(VitaGlDisplay* display);
+    bool preserve_color_on_clear = false;
+
     void wait_async_idle();
 
     void set_render_state(std::uint32_t state, std::uint32_t value) override;
