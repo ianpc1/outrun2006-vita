@@ -69,11 +69,12 @@ Runs the decompiled PC game engine natively on **ARM Cortex-A9 + vitaGL (PowerVR
 
 ### Requirements
 1. PS Vita or PS TV with **HENkaku / Enso** and **VitaShell**.
-2. An original **Steam** PC copy of **OutRun 2006: Coast 2 Coast** (DVD retail, No-CD, or patched/FXT executables are not supported), including `OR2006C2C.EXE` and all data folders (`BK`, `Cars`, `Chr`, `Common`, `Driver`, `Media`, `OSO`, `Scripts`, `Sound`, `Sprani`, `Sprite`, `Stage`, `Text`, etc.).
+2. **`libshacccg.suprx`** installed in `ur0:data/` (required by `vitaGL` / `vitashark` for runtime shader compilation — install via **ShaRKF00D**). *(`kubridge.skprx` is **not** required, since this is a native Vita port and not an Android `so-loader`.)*
+3. An original **Steam** PC copy of **OutRun 2006: Coast 2 Coast** (DVD retail, No-CD, or patched/FXT executables are not supported), including `OR2006C2C.EXE` and all data folders (`BK`, `Cars`, `Chr`, `Common`, `Driver`, `Media`, `OSO`, `Scripts`, `Sound`, `Sprani`, `Sprite`, `Stage`, `Text`, etc.).
    - Supported `OR2006C2C.EXE` (**Steam**): `962,560` bytes — SHA-256: `4876712f501640951d892069db826e431aede3e4ab87686fc1d556e26df9fec1`
    - You do **not** need to run or unpack `OR2006C2C.EXE` on PC; the PS Vita port unpacks it automatically on first launch and generates `OR2006C2C.cache`.
-3. ~1.5 GB free on `ux0:`.
-4. **Overclock recommended** (e.g. PSVshell at 444/500 MHz CPU, 222 MHz GPU) to hold a steady 30 FPS across all stages.
+4. ~1.5 GB free on `ux0:`.
+5. **Overclock recommended** (e.g. PSVshell at 444/500 MHz CPU, 222 MHz GPU) to hold a steady 30 FPS across all stages.
 
 ### Steps
 1. Install `OutRun2006.vpk` via **VitaShell** (accept extended permissions).
