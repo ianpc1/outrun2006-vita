@@ -6,6 +6,24 @@ Native port of **OutRun 2006: Coast 2 Coast** (PC / Steam version) for **PlaySta
 
 Runs the decompiled PC game engine natively on **ARM Cortex-A9 + vitaGL (PowerVR SGX543MP4+)** at native **960×544** resolution and **locked 30 FPS in races** (up to 60 FPS in menus).
 
+## Screenshots (PS Vita — 960×544)
+
+| Title Screen | Main Menu |
+| :---: | :---: |
+| ![Title Screen](screenshot/tittle%20screen.jpg) | ![Main Menu](screenshot/main%20menu.jpg) |
+
+| Car Select | Music Select |
+| :---: | :---: |
+| ![Car Select](screenshot/car_select.jpg) | ![Music Select](screenshot/music%20select.jpg) |
+
+| Race Start (Flagman) | In-Game Race |
+| :---: | :---: |
+| ![Race Start](screenshot/flagman1.jpg) | ![In-Game Race](screenshot/in_game%20race.jpg) |
+
+| OutRun 2 SP — Heart Attack | Settings |
+| :---: | :---: |
+| ![OutRun 2 SP Heart Attack](screenshot/outrun2sp-hear%20attack.jpg) | ![Settings](screenshot/setting.jpg) |
+
 ---
 
 ## Current Status — What Works
@@ -27,7 +45,6 @@ Runs the decompiled PC game engine natively on **ARM Cortex-A9 + vitaGL (PowerVR
 - **Coast 2 Coast Mode — Clarissa Missions (`variant 5` / Request Mode):**
   - All 82 bulk logic functions are already compiled in `vita/source/bulk_vita_tr.cpp`, but ~51 external services still need to be wired in `src/platform/race_traffic_runtime.cpp` (14 matrix/vector math helpers, 3 CRT helpers, and ~34 mission/HUD getters). It currently enters the race / black screen when hitting the first unwired service (`0x48B140`).
 - **Single Player & OutRun 2 SP:**
-  - The race timer does not count down in Single Player or OutRun 2 SP.
   - **OutRun 2 SP — Time Attack:** hangs on a black screen (similar to Clarissa missions).
   - **Heart Attack (OutRun 2):** the mission prompt bubble does not appear on screen (only the mission start/end markers on the road appear).
   - **Heart Attack (OutRun 2 SP):** the mission prompt bubble appears, but mission events (such as spawning traffic/objectives) do not trigger (only the mission start/end markers on the road appear).

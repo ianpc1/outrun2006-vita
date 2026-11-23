@@ -22,6 +22,8 @@ param.sfo
 __pycache__/
 *.pyc
 .DS_Store
+*:Zone.Identifier
+*.Identifier
 
 # Game files and anything made from them: never committed
 *.exe

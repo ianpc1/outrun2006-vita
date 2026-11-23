@@ -6,6 +6,24 @@ Port nativo de **OutRun 2006: Coast 2 Coast** (versión PC / Steam) para **PlayS
 
 Ejecuta el motor decompilado del juego de PC de forma nativa sobre **ARM Cortex-A9 + vitaGL (PowerVR SGX543MP4+)** a resolución nativa **960×544** y **30 FPS estables en carrera** (hasta 60 FPS en menús).
 
+## Capturas (PS Vita — 960×544)
+
+| Pantalla de título | Menú principal |
+| :---: | :---: |
+| ![Pantalla de título](screenshot/tittle%20screen.jpg) | ![Menú principal](screenshot/main%20menu.jpg) |
+
+| Selección de coche | Selección de música |
+| :---: | :---: |
+| ![Selección de coche](screenshot/car_select.jpg) | ![Selección de música](screenshot/music%20select.jpg) |
+
+| Salida (Flagman) | En carrera |
+| :---: | :---: |
+| ![Salida Flagman](screenshot/flagman1.jpg) | ![En carrera](screenshot/in_game%20race.jpg) |
+
+| OutRun 2 SP — Heart Attack | Opciones |
+| :---: | :---: |
+| ![OutRun 2 SP Heart Attack](screenshot/outrun2sp-hear%20attack.jpg) | ![Opciones](screenshot/setting.jpg) |
+
 ---
 
 ## Estado actual — Qué funciona
@@ -27,7 +45,6 @@ Ejecuta el motor decompilado del juego de PC de forma nativa sobre **ARM Cortex-
 - **Modo Coast 2 Coast — Misiones de Clarissa (`variant 5` / Request Mode):**
   - Las 82 funciones de lógica bulk ya están compiladas en `vita/source/bulk_vita_tr.cpp`, pero faltan por conectar ~51 servicios externos en `src/platform/race_traffic_runtime.cpp` (14 de mates matriz/vector, 3 de CRT y ~34 getters/helpers de misiones y HUD). Actualmente se queda en pantalla en negro / bloqueado al llegar al primer servicio sin cablear (`0x48B140`).
 - **Single Player y OutRun 2 SP:**
-  - El temporizador (timer) no baja ni en Single Player ni en OutRun 2 SP.
   - **OutRun 2 SP — Time Attack:** se queda en pantalla en negro (igual que en las misiones de Clarissa).
   - **Heart Attack (OutRun 2):** no aparece el bocadillo de misiones en pantalla (solo salen los marcadores de inicio y fin de misión en la carretera).
   - **Heart Attack (OutRun 2 SP):** aparece el bocadillo de misión, pero no ejecuta los eventos de la misión (aparición de tráfico especial, objetivos, etc.), aunque sí salen los marcadores de inicio y fin en la carretera.
